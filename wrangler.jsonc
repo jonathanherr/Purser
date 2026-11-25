@@ -1,0 +1,44 @@
+// Cloudflare Workers deploy for the Purser vault. See README "Deploy to Cloudflare".
+// No secrets in this file: PLAID_CLIENT_ID, PLAID_SECRET and VAULT_MASTER_KEY are uploaded by
+// the deploy workflow from GitHub secrets (or with `wrangler secret put`).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "purser-vault",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // D1 (SQLite). The deploy workflow finds or creates the "purser" database and fills in its
+  // id, so nothing needs to be created by hand. To deploy from your own machine instead, run
+  // `npx wrangler d1 create purser` and paste the id here (the id is not a secret).
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "purser",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "vars": {
+    "PLAID_ENV": "sandbox"
+    // PLAID_WEBHOOK_URL: set once the public URL is known, e.g.
+    // "https://purser-vault.<your-subdomain>.workers.dev/plaid/webhook"
+  },
+
+  // Replaces the Node process's timers. Keep the first in sync with EXPIRY_CRON in src/worker.ts.
+  "triggers": {
+    "crons": [
+      "*/15 * * * *", // expire stale proposals
+      "0 */6 * * *" // backstop Plaid sync in case a webhook is missed
+    ]
+  },
+
+  // The vault is not reachable until you choose to expose it: no workers.dev URL and no
+  // preview URLs. Flip workers_dev to true (or add a route) when you're ready for Plaid
+  // webhooks and remote agents to reach it.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  "observability": { "enabled": true }
+}

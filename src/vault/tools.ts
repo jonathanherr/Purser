@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Db } from '../db/index.js';
+import { json, NOW, type Db } from '../db/index.js';
 import type { AgentClient, Scope } from './auth.js';
 import { accountFilter } from './visibility.js';
 import { createProposal, ProposalPayload } from './proposals.js';
@@ -45,7 +45,7 @@ export const TOOLS = [
     async run({ db, agent }) {
       const s = accountFilter(agent.viewer, 'summary', 'a', 1);
       const d = accountFilter(agent.viewer, 'detail', 'a', 1 + s.params.length);
-      const { rows } = await db.query(
+      const { rows } = await db.query<Record<string, unknown>>(
         `SELECT a.id, a.name, a.type, a.subtype, a.mask, a.owner_member_id AS owner, a.visibility,
                 a.current_balance, a.available_balance, a.iso_currency_code AS currency,
                 (${d.sql}) AS detail_visible, i.name AS institution
@@ -54,7 +54,7 @@ export const TOOLS = [
           ORDER BY a.type, a.name`,
         [...s.params, ...d.params],
       );
-      return { rows: rows.length, data: rows };
+      return { rows: rows.length, data: rows.map((r) => ({ ...r, detail_visible: Boolean(r.detail_visible) })) };
     },
   }),
 
@@ -69,7 +69,7 @@ export const TOOLS = [
       const { rows } = await db.query(
         `SELECT b.account_id, b.as_of, b.current, b.available
            FROM balances b JOIN accounts a ON a.id = b.account_id
-          WHERE ($1::uuid IS NULL OR b.account_id = $1) AND ($2::date IS NULL OR b.as_of >= $2) AND ${f.sql}
+          WHERE (?1 IS NULL OR b.account_id = ?1) AND (?2 IS NULL OR b.as_of >= ?2) AND ${f.sql}
           ORDER BY b.as_of DESC LIMIT ${MAX_ROWS}`,
         [args.account_id ?? null, args.since ?? null, ...f.params],
       );
@@ -100,14 +100,14 @@ export const TOOLS = [
         `SELECT t.id, t.date, t.amount, t.iso_currency_code AS currency, t.account_id, t.pending,
                 t.category_id, t.category_source, t.plaid_category, t.merchant_name, t.raw_name
            FROM transactions t JOIN accounts a ON a.id = t.account_id
-          WHERE t.removed_at IS NULL AND t.date BETWEEN $1 AND $2
-            AND ($3::uuid IS NULL OR t.account_id = $3)
-            AND ($4::text IS NULL OR t.category_id = $4)
-            AND ($5::boolean IS NOT TRUE OR t.category_id IS NULL)
-            AND ($6::numeric IS NULL OR t.amount >= $6)
-            AND ($7::numeric IS NULL OR t.amount <= $7)
+          WHERE t.removed_at IS NULL AND t.date BETWEEN ?1 AND ?2
+            AND (?3 IS NULL OR t.account_id = ?3)
+            AND (?4 IS NULL OR t.category_id = ?4)
+            AND (coalesce(?5, 0) = 0 OR t.category_id IS NULL)
+            AND (?6 IS NULL OR t.amount >= ?6)
+            AND (?7 IS NULL OR t.amount <= ?7)
             AND ${f.sql}
-          ORDER BY t.date DESC, t.id LIMIT $8 OFFSET $9`,
+          ORDER BY t.date DESC, t.id LIMIT ?8 OFFSET ?9`,
         [
           args.start_date,
           args.end_date,
@@ -121,8 +121,9 @@ export const TOOLS = [
           ...f.params,
         ],
       );
-      const data = rows.map(({ merchant_name, raw_name, ...rest }) => ({
+      const data = rows.map(({ merchant_name, raw_name, pending, ...rest }) => ({
         ...rest,
+        pending: Boolean(pending),
         ...untrusted({ merchant_name, raw_name }),
       }));
       return { rows: data.length, data };
@@ -142,16 +143,16 @@ export const TOOLS = [
         args.group_by === 'category'
           ? `coalesce(t.category_id, 'uncategorized') AS category`
           : args.group_by === 'month'
-            ? `to_char(t.date, 'YYYY-MM') AS month`
-            : `coalesce(t.category_id, 'uncategorized') AS category, to_char(t.date, 'YYYY-MM') AS month`;
+            ? `substr(t.date, 1, 7) AS month`
+            : `coalesce(t.category_id, 'uncategorized') AS category, substr(t.date, 1, 7) AS month`;
       const groups = args.group_by === 'category' ? '1' : args.group_by === 'month' ? '1' : '1, 2';
       const { rows } = await db.query(
         `SELECT ${cols},
-                coalesce(sum(t.amount) FILTER (WHERE t.amount > 0), 0) AS outflow,
-                coalesce(-sum(t.amount) FILTER (WHERE t.amount < 0), 0) AS inflow,
-                count(*)::int AS transactions
+                round(coalesce(sum(CASE WHEN t.amount > 0 THEN t.amount END), 0), 2) AS outflow,
+                round(coalesce(-sum(CASE WHEN t.amount < 0 THEN t.amount END), 0), 2) AS inflow,
+                count(*) AS transactions
            FROM transactions t JOIN accounts a ON a.id = t.account_id
-          WHERE t.removed_at IS NULL AND t.date BETWEEN $1 AND $2 AND ${f.sql}
+          WHERE t.removed_at IS NULL AND t.date BETWEEN ?1 AND ?2 AND ${f.sql}
           GROUP BY ${groups} ORDER BY ${groups}`,
         [args.start_date, args.end_date, ...f.params],
       );
@@ -174,7 +175,7 @@ export const TOOLS = [
            JOIN accounts a ON a.id = h.account_id
            JOIN securities s ON s.plaid_security_id = h.plaid_security_id
           WHERE h.as_of = (SELECT max(as_of) FROM holdings h2 WHERE h2.account_id = h.account_id)
-            AND ($1::uuid IS NULL OR h.account_id = $1) AND ${f.sql}
+            AND (?1 IS NULL OR h.account_id = ?1) AND ${f.sql}
           ORDER BY h.institution_value DESC NULLS LAST LIMIT ${MAX_ROWS}`,
         [args.account_id ?? null, ...f.params],
       );
@@ -190,31 +191,30 @@ export const TOOLS = [
       'Each budget envelope for a month: target, spent so far, and a straight-line projection to month end.',
     input: { month },
     async run({ db, agent }, args) {
+      // Month arithmetic in JS (UTC), so the SQL stays portable.
+      const [y, m] = args.month.split('-').map(Number) as [number, number];
       const first = `${args.month}-01`;
-      const f = accountFilter(agent.viewer, 'summary', 'a', 2);
+      const next = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
+      const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+      const today = new Date().toISOString().slice(0, 10);
+      const elapsed = today < first ? 0 : today >= next ? days : Number(today.slice(8, 10));
+      const f = accountFilter(agent.viewer, 'summary', 'a', 5);
       const { rows } = await db.query(
         `WITH spent AS (
            SELECT t.category_id, sum(t.amount) AS spent
              FROM transactions t JOIN accounts a ON a.id = t.account_id
             WHERE t.removed_at IS NULL AND t.amount > 0
-              AND t.date >= $1::date AND t.date < ($1::date + interval '1 month') AND ${f.sql}
+              AND t.date >= ?1 AND t.date < ?2 AND ${f.sql}
             GROUP BY t.category_id
-         ), span AS (
-           SELECT extract(day FROM ($1::date + interval '1 month' - interval '1 day'))::int AS days,
-                  CASE WHEN current_date < $1::date THEN 0
-                       WHEN current_date >= ($1::date + interval '1 month') THEN
-                         extract(day FROM ($1::date + interval '1 month' - interval '1 day'))::int
-                       ELSE extract(day FROM current_date)::int END AS elapsed
          )
-         SELECT b.category_id, c.name, b.amount AS target, coalesce(s.spent, 0) AS spent,
-                CASE WHEN span.elapsed = 0 THEN 0
-                     ELSE round(coalesce(s.spent, 0) / span.elapsed * span.days, 2) END AS projected
+         SELECT b.category_id, c.name, b.amount AS target, round(coalesce(s.spent, 0), 2) AS spent,
+                CASE WHEN ?4 = 0 THEN 0
+                     ELSE round(coalesce(s.spent, 0) / ?4 * ?3, 2) END AS projected
            FROM budgets b JOIN categories c ON c.id = b.category_id
            LEFT JOIN spent s ON s.category_id = b.category_id
-           CROSS JOIN span
-          WHERE b.month = $1::date
+          WHERE b.month = ?1
           ORDER BY c.name`,
-        [first, ...f.params],
+        [first, next, days, elapsed, ...f.params],
       );
       return { rows: rows.length, data: rows };
     },
@@ -241,12 +241,12 @@ export const TOOLS = [
     async run({ db, agent }, args) {
       const f = accountFilter(agent.viewer, 'detail', 'a', 3);
       const { rows } = await db.query(
-        `UPDATE transactions t SET category_id = $2, category_source = 'agent', updated_at = now()
-           FROM accounts a
-          WHERE t.id = $1 AND a.id = t.account_id AND ${f.sql}
-            AND EXISTS (SELECT 1 FROM categories WHERE id = $2)
-            AND coalesce(t.category_source, '') <> 'member'
-          RETURNING t.id`,
+        `UPDATE transactions SET category_id = ?2, category_source = 'agent', updated_at = ${NOW}
+          WHERE id = ?1
+            AND account_id IN (SELECT a.id FROM accounts a WHERE ${f.sql})
+            AND EXISTS (SELECT 1 FROM categories WHERE id = ?2)
+            AND coalesce(category_source, '') <> 'member'
+          RETURNING id`,
         [args.transaction_id, args.category_id, ...f.params],
       );
       return {
@@ -273,7 +273,7 @@ export const TOOLS = [
     async run({ db, agent }, args) {
       const { rows } = await db.query<{ id: string }>(
         `INSERT INTO flags (agent_id, kind, severity, subject_type, subject_id, note)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id`,
         [agent.id, args.kind, args.severity, args.subject_type ?? null, args.subject_id ?? null, args.note],
       );
       return { rows: 1, data: { id: rows[0]!.id } };
@@ -291,7 +291,7 @@ export const TOOLS = [
       const { rows } = await db.query(
         `SELECT f.id, f.kind, f.severity, f.subject_type, f.subject_id, f.note, f.created_at, ac.name AS raised_by
            FROM flags f JOIN agent_clients ac ON ac.id = f.agent_id
-          WHERE f.status = $1 AND (ac.acts_for = 'household' OR ac.acts_for = $2)
+          WHERE f.status = ?1 AND (ac.acts_for = 'household' OR ac.acts_for = ?2)
           ORDER BY f.created_at DESC LIMIT ${MAX_ROWS}`,
         [args.status, actsFor],
       );
@@ -318,13 +318,14 @@ export const TOOLS = [
     description: 'Your own proposals and where each one stands.',
     input: { status: z.enum(['blocked', 'pending', 'approved', 'rejected', 'expired', 'executed', 'failed']).optional() },
     async run({ db, agent }, args) {
-      const { rows } = await db.query(
+      const { rows } = await db.query<Record<string, unknown>>(
         `SELECT id, kind, payload, reason, status, precheck, approvals_required, created_at, expires_at, decided_at
-           FROM proposals WHERE agent_id = $1 AND ($2::text IS NULL OR status = $2)
+           FROM proposals WHERE agent_id = ?1 AND (?2 IS NULL OR status = ?2)
           ORDER BY created_at DESC LIMIT 100`,
         [agent.id, args.status ?? null],
       );
-      return { rows: rows.length, data: rows };
+      const data = rows.map((r) => ({ ...r, payload: json(r.payload), precheck: json(r.precheck) }));
+      return { rows: data.length, data };
     },
   }),
 ] as const;

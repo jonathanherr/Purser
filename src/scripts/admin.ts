@@ -15,7 +15,7 @@ export const AGENT_PRESETS: Record<string, Scope[]> = {
 export async function createMember(db: Db, id: string, displayName: string, role: 'owner' | 'member') {
   const token = newToken('pm');
   await db.query(
-    `INSERT INTO members (id, display_name, role, token_hash) VALUES ($1, $2, $3, $4)
+    `INSERT INTO members (id, display_name, role, token_hash) VALUES (?1, ?2, ?3, ?4)
      ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name, role = EXCLUDED.role, token_hash = EXCLUDED.token_hash`,
     [id, displayName, role, hashToken(token)],
   );
@@ -26,12 +26,12 @@ export async function createMember(db: Db, id: string, displayName: string, role
 export async function createAgent(db: Db, id: string, scopes: Scope[], actsFor: string) {
   for (const s of scopes) if (!(SCOPES as readonly string[]).includes(s)) throw new Error(`unknown scope ${s}`);
   if (actsFor !== 'household') {
-    const { rows } = await db.query(`SELECT 1 FROM members WHERE id = $1`, [actsFor]);
+    const { rows } = await db.query(`SELECT 1 FROM members WHERE id = ?1`, [actsFor]);
     if (!rows.length) throw new Error(`no member ${actsFor}`);
   }
   const token = newToken('pa');
   await db.query(
-    `INSERT INTO agent_clients (id, name, token_hash, scopes, acts_for) VALUES ($1, $1, $2, $3, $4)
+    `INSERT INTO agent_clients (id, name, token_hash, scopes, acts_for) VALUES (?1, ?1, ?2, ?3, ?4)
      ON CONFLICT (id) DO UPDATE SET token_hash = EXCLUDED.token_hash, scopes = EXCLUDED.scopes,
        acts_for = EXCLUDED.acts_for, revoked_at = NULL`,
     [id, hashToken(token), scopes, actsFor],

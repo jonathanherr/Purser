@@ -5,7 +5,7 @@ type Holding = Plaid.Holding;
 type Security = Plaid.Security;
 type Transaction = Plaid.Transaction;
 type RemovedTransaction = Plaid.RemovedTransaction;
-import type { Db } from '../db/index.js';
+import { json, NOW, type Db, type Stmt } from '../db/index.js';
 import type { KeyProvider } from '../crypto/envelope.js';
 import { seal, unseal } from '../crypto/envelope.js';
 import { audit } from '../vault/audit.js';
@@ -19,7 +19,7 @@ interface InstitutionRow {
   wrapped_dek: string;
   key_id: string;
   transactions_cursor: string | null;
-  products: string[];
+  products: string;
 }
 
 export interface SyncResult {
@@ -53,10 +53,10 @@ export async function storeInstitution(
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO institutions (owner_member_id, plaid_item_id, plaid_institution_id, name,
                                access_token_ct, wrapped_dek, key_id, products)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
      ON CONFLICT (plaid_item_id) DO UPDATE SET
-       access_token_ct = EXCLUDED.access_token_ct, wrapped_dek = EXCLUDED.wrapped_dek,
-       key_id = EXCLUDED.key_id, status = 'active', last_error = NULL
+       access_token_ct = excluded.access_token_ct, wrapped_dek = excluded.wrapped_dek,
+       key_id = excluded.key_id, status = 'active', last_error = NULL
      RETURNING id`,
     [
       args.ownerMemberId,
@@ -92,7 +92,7 @@ export async function syncInstitution(
   const { rows } = await db.query<InstitutionRow>(
     `SELECT id, owner_member_id, plaid_item_id, access_token_ct, wrapped_dek, key_id,
             transactions_cursor, products
-       FROM institutions WHERE id = $1 AND status <> 'removed'`,
+       FROM institutions WHERE id = ?1 AND status <> 'removed'`,
     [institutionId],
   );
   const inst = rows[0];
@@ -117,28 +117,33 @@ export async function syncInstitution(
 
     const accounts = await plaid.getAccounts(accessToken);
     const tx = await pullTransactions(plaid, accessToken, inst.transactions_cursor);
-    const investments = inst.products.includes('investments')
+    const investments = json<string[]>(inst.products).includes('investments')
       ? await pullHoldings(plaid, accessToken)
       : null;
 
-    await db.tx(async (t) => {
-      result.accounts = await upsertAccounts(t, inst, accounts);
-      const counts = await applyTransactions(t, tx.added, tx.modified, tx.removed);
-      result.added = counts.added;
-      result.modified = counts.modified;
-      result.removed = counts.removed;
-      if (investments) result.holdings = await upsertHoldings(t, investments.holdings, investments.securities);
-      await t.query(
-        `UPDATE institutions SET transactions_cursor = $2, last_synced_at = now(), status = 'active',
-                last_error = NULL WHERE id = $1`,
-        [inst.id, tx.cursor],
-      );
-    });
+    // Every ledger write for this sync lands in one atomic batch, cursor included: if any
+    // statement fails, nothing is written and the next sync retries from the old cursor.
+    // On D1 the whole batch also counts as a single query against the per-request limit.
+    await db.batch([
+      ...upsertAccounts(inst, accounts),
+      ...applyTransactions(tx.added, tx.modified, tx.removed),
+      ...(investments ? upsertHoldings(investments.holdings, investments.securities) : []),
+      {
+        sql: `UPDATE institutions SET transactions_cursor = ?2, last_synced_at = ${NOW}, status = 'active',
+                last_error = NULL WHERE id = ?1`,
+        params: [inst.id, tx.cursor],
+      },
+    ]);
+    result.accounts = accounts.length;
+    result.added = tx.added.length;
+    result.modified = tx.modified.length;
+    result.removed = tx.removed.length;
+    result.holdings = investments?.holdings.length ?? 0;
   } catch (err) {
     const code = plaidErrorCode(err);
     result.status = code === 'ITEM_LOGIN_REQUIRED' ? 'needs_relink' : 'error';
     result.error = code ?? (err instanceof Error ? err.message : String(err));
-    await db.query(`UPDATE institutions SET status = $2, last_error = $3 WHERE id = $1`, [
+    await db.query(`UPDATE institutions SET status = ?2, last_error = ?3 WHERE id = ?1`, [
       inst.id,
       result.status,
       result.error,
@@ -198,20 +203,18 @@ async function pullHoldings(plaid: PlaidLike, accessToken: string) {
   }
 }
 
-async function upsertAccounts(db: Db, inst: InstitutionRow, accounts: AccountBase[]): Promise<number> {
-  for (const a of accounts) {
-    // New accounts start private. Only the owner can widen visibility later.
-    const { rows } = await db.query<{ id: string }>(
-      `INSERT INTO accounts (institution_id, plaid_account_id, owner_member_id, name, official_name,
+function upsertAccounts(inst: InstitutionRow, accounts: AccountBase[]): Stmt[] {
+  return accounts.flatMap((a): Stmt[] => [
+    {
+      sql: `INSERT INTO accounts (institution_id, plaid_account_id, owner_member_id, name, official_name,
                              type, subtype, mask, current_balance, available_balance, iso_currency_code)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
        ON CONFLICT (plaid_account_id) DO UPDATE SET
-         name = EXCLUDED.name, official_name = EXCLUDED.official_name, type = EXCLUDED.type,
-         subtype = EXCLUDED.subtype, mask = EXCLUDED.mask,
-         current_balance = EXCLUDED.current_balance, available_balance = EXCLUDED.available_balance,
-         iso_currency_code = EXCLUDED.iso_currency_code, updated_at = now()
-       RETURNING id`,
-      [
+         name = excluded.name, official_name = excluded.official_name, type = excluded.type,
+         subtype = excluded.subtype, mask = excluded.mask,
+         current_balance = excluded.current_balance, available_balance = excluded.available_balance,
+         iso_currency_code = excluded.iso_currency_code, updated_at = ${NOW}`,
+      params: [
         inst.id,
         a.account_id,
         inst.owner_member_id,
@@ -224,36 +227,31 @@ async function upsertAccounts(db: Db, inst: InstitutionRow, accounts: AccountBas
         a.balances.available ?? null,
         a.balances.iso_currency_code ?? null,
       ],
-    );
-    await db.query(
-      `INSERT INTO balances (account_id, as_of, current, available) VALUES ($1, now(), $2, $3)
+    },
+    {
+      sql: `INSERT INTO balances (account_id, as_of, current, available)
+       SELECT id, ${NOW}, ?2, ?3 FROM accounts WHERE plaid_account_id = ?1
        ON CONFLICT DO NOTHING`,
-      [rows[0]!.id, a.balances.current ?? null, a.balances.available ?? null],
-    );
-  }
-  return accounts.length;
+      params: [a.account_id, a.balances.current ?? null, a.balances.available ?? null],
+    },
+  ]);
 }
 
-async function applyTransactions(
-  db: Db,
-  added: Transaction[],
-  modified: Transaction[],
-  removed: RemovedTransaction[],
-) {
-  for (const t of [...added, ...modified]) {
-    await db.query(
-      `INSERT INTO transactions (plaid_transaction_id, account_id, date, authorized_date, amount,
+function applyTransactions(added: Transaction[], modified: Transaction[], removed: RemovedTransaction[]): Stmt[] {
+  const upserts = [...added, ...modified].map(
+    (t): Stmt => ({
+      sql: `INSERT INTO transactions (plaid_transaction_id, account_id, date, authorized_date, amount,
                                  iso_currency_code, merchant_name, raw_name, pending, plaid_category,
                                  raw)
-       SELECT $1, a.id, $3, $4, $5, $6, $7, $8, $9, $10, $11
-         FROM accounts a WHERE a.plaid_account_id = $2
+       SELECT ?1, a.id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+         FROM accounts a WHERE a.plaid_account_id = ?2
        ON CONFLICT (plaid_transaction_id) DO UPDATE SET
-         date = EXCLUDED.date, authorized_date = EXCLUDED.authorized_date, amount = EXCLUDED.amount,
-         iso_currency_code = EXCLUDED.iso_currency_code, merchant_name = EXCLUDED.merchant_name,
-         raw_name = EXCLUDED.raw_name, pending = EXCLUDED.pending,
-         plaid_category = EXCLUDED.plaid_category, raw = EXCLUDED.raw,
-         removed_at = NULL, updated_at = now()`,
-      [
+         date = excluded.date, authorized_date = excluded.authorized_date, amount = excluded.amount,
+         iso_currency_code = excluded.iso_currency_code, merchant_name = excluded.merchant_name,
+         raw_name = excluded.raw_name, pending = excluded.pending,
+         plaid_category = excluded.plaid_category, raw = excluded.raw,
+         removed_at = NULL, updated_at = ${NOW}`,
+      params: [
         t.transaction_id,
         t.account_id,
         t.date,
@@ -266,37 +264,37 @@ async function applyTransactions(
         t.personal_finance_category?.primary ?? null,
         JSON.stringify(t),
       ],
-    );
-  }
-  for (const r of removed) {
-    await db.query(
-      `UPDATE transactions SET removed_at = now(), updated_at = now() WHERE plaid_transaction_id = $1`,
-      [r.transaction_id],
-    );
-  }
-  return { added: added.length, modified: modified.length, removed: removed.length };
+    }),
+  );
+  const removals = removed.map(
+    (r): Stmt => ({
+      sql: `UPDATE transactions SET removed_at = ${NOW}, updated_at = ${NOW} WHERE plaid_transaction_id = ?1`,
+      params: [r.transaction_id],
+    }),
+  );
+  return [...upserts, ...removals];
 }
 
-async function upsertHoldings(db: Db, holdings: Holding[], securities: Security[]): Promise<number> {
-  for (const s of securities) {
-    await db.query(
-      `INSERT INTO securities (plaid_security_id, name, ticker, type, close_price, close_price_as_of)
-       VALUES ($1, $2, $3, $4, $5, $6)
+function upsertHoldings(holdings: Holding[], securities: Security[]): Stmt[] {
+  const secs = securities.map(
+    (s): Stmt => ({
+      sql: `INSERT INTO securities (plaid_security_id, name, ticker, type, close_price, close_price_as_of)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6)
        ON CONFLICT (plaid_security_id) DO UPDATE SET
-         name = EXCLUDED.name, ticker = EXCLUDED.ticker, type = EXCLUDED.type,
-         close_price = EXCLUDED.close_price, close_price_as_of = EXCLUDED.close_price_as_of`,
-      [s.security_id, s.name ?? null, s.ticker_symbol ?? null, s.type ?? null, s.close_price ?? null, s.close_price_as_of ?? null],
-    );
-  }
-  for (const h of holdings) {
-    await db.query(
-      `INSERT INTO holdings (account_id, plaid_security_id, as_of, quantity, cost_basis, institution_value)
-       SELECT a.id, $2, current_date, $3, $4, $5 FROM accounts a WHERE a.plaid_account_id = $1
+         name = excluded.name, ticker = excluded.ticker, type = excluded.type,
+         close_price = excluded.close_price, close_price_as_of = excluded.close_price_as_of`,
+      params: [s.security_id, s.name ?? null, s.ticker_symbol ?? null, s.type ?? null, s.close_price ?? null, s.close_price_as_of ?? null],
+    }),
+  );
+  const pos = holdings.map(
+    (h): Stmt => ({
+      sql: `INSERT INTO holdings (account_id, plaid_security_id, as_of, quantity, cost_basis, institution_value)
+       SELECT a.id, ?2, date('now'), ?3, ?4, ?5 FROM accounts a WHERE a.plaid_account_id = ?1
        ON CONFLICT (account_id, plaid_security_id, as_of) DO UPDATE SET
-         quantity = EXCLUDED.quantity, cost_basis = EXCLUDED.cost_basis,
-         institution_value = EXCLUDED.institution_value`,
-      [h.account_id, h.security_id, h.quantity, h.cost_basis ?? null, h.institution_value],
-    );
-  }
-  return holdings.length;
+         quantity = excluded.quantity, cost_basis = excluded.cost_basis,
+         institution_value = excluded.institution_value`,
+      params: [h.account_id, h.security_id, h.quantity, h.cost_basis ?? null, h.institution_value],
+    }),
+  );
+  return [...secs, ...pos];
 }

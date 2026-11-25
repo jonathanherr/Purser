@@ -1,13 +1,15 @@
 import { parseArgs } from 'node:util';
 import { runtime } from '../runtime.js';
-import { migrate } from '../db/index.js';
+import { migrate } from '../db/migrate.js';
 import { AGENT_PRESETS, createAgent, createMember } from './admin.js';
 import { linkSandboxInstitution } from '../plaid/link.js';
 import { syncAll } from '../plaid/sync.js';
 import type { Scope } from '../vault/auth.js';
 
 /**
- * Admin commands, run from a trusted shell (never exposed over HTTP):
+ * Admin commands, run from a trusted shell (never exposed over HTTP). They use the local SQLite
+ * file by default; with PURSER_DB=remote they run against the production D1 database through
+ * Cloudflare's API (see README).
  *   migrate
  *   member:create --id jonathan --name Jonathan --role owner
  *   agent:create  --id categorizer --preset categorizer --acts-for household
@@ -29,7 +31,11 @@ const { values } = parseArgs({
   },
 });
 
-const rt = runtime({ requirePlaid: command === 'sandbox:link' || command === 'sync' });
+const needsKey = command === 'sandbox:link' || command === 'sync';
+const rt = runtime({ requirePlaid: needsKey, requireKey: needsKey });
+if (command === 'migrate' && rt.config.PURSER_DB === 'remote') {
+  throw new Error('Production D1 is migrated with: npx wrangler d1 migrations apply DB --remote');
+}
 try {
   switch (command) {
     case 'migrate': {
@@ -54,12 +60,12 @@ try {
     }
     case 'sandbox:link': {
       if (!values.member) throw new Error('--member is required');
-      const r = await linkSandboxInstitution(rt.db, rt.plaid!, rt.kp, { memberId: values.member, institutionId: values.institution });
+      const r = await linkSandboxInstitution(rt.db, rt.plaid!, rt.kp!, { memberId: values.member, institutionId: values.institution });
       console.log(JSON.stringify(r, null, 2));
       break;
     }
     case 'sync':
-      console.log(JSON.stringify(await syncAll(rt.db, rt.plaid!, rt.kp), null, 2));
+      console.log(JSON.stringify(await syncAll(rt.db, rt.plaid!, rt.kp!), null, 2));
       break;
     default:
       throw new Error(`unknown command ${command ?? '(none)'}`);

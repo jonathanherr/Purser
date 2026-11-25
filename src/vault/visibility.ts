@@ -21,6 +21,6 @@ export function accountFilter(
       : { sql: `${alias}.visibility IN ('shared', 'private')`, params: [] };
   }
   return level === 'detail'
-    ? { sql: `(${alias}.visibility = 'shared' OR ${alias}.owner_member_id = $${next})`, params: [viewer.memberId] }
-    : { sql: `(${alias}.visibility <> 'hidden' OR ${alias}.owner_member_id = $${next})`, params: [viewer.memberId] };
+    ? { sql: `(${alias}.visibility = 'shared' OR ${alias}.owner_member_id = ?${next})`, params: [viewer.memberId] }
+    : { sql: `(${alias}.visibility <> 'hidden' OR ${alias}.owner_member_id = ?${next})`, params: [viewer.memberId] };
 }

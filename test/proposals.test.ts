@@ -25,7 +25,7 @@ describe('proposals', () => {
     expect(await decide(db, jonathan, p.id, 'approve')).toEqual({ ok: false, error: 'already_decided' });
     expect(await decide(db, partner, p.id, 'approve')).toMatchObject({ ok: true, status: 'approved' });
 
-    const { rows } = await db.query<{ status: string }>(`SELECT status FROM proposals WHERE id = $1`, [p.id]);
+    const { rows } = await db.query<{ status: string }>(`SELECT status FROM proposals WHERE id = ?1`, [p.id]);
     expect(rows[0]!.status).toBe('approved');
   });
 
@@ -74,7 +74,7 @@ describe('proposals', () => {
   it('expires proposals after their time to live', async () => {
     const { db, agent, ids, jonathan } = await setup();
     const p = await createProposal(db, agent, { kind: 'trade', account_id: ids['acc-broker-3333']!, side: 'buy', ticker: 'VTI', notional_usd: 100 }, 'x');
-    await db.query(`UPDATE proposals SET expires_at = now() - interval '1 minute' WHERE id = $1`, [p.id]);
+    await db.query(`UPDATE proposals SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 minute') WHERE id = ?1`, [p.id]);
     expect(await expireProposals(db)).toBe(1);
     expect(await decide(db, jonathan, p.id, 'approve')).toEqual({ ok: false, error: 'not_pending' });
   });
