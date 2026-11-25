@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server';
 import { runtime } from './runtime.js';
-import { migrate } from './db/index.js';
+import { migrate } from './db/migrate.js';
 import { createApp } from './http/app.js';
 import { syncAll } from './plaid/sync.js';
 import { expireProposals } from './vault/proposals.js';

@@ -14,7 +14,7 @@ const Env = z.object({
 
 export type Config = z.infer<typeof Env>;
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+export function loadConfig(env: Record<string, unknown> = process.env): Config {
   const parsed = Env.safeParse(env);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('\n  ');

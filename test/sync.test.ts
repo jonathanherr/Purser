@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { storeInstitution, syncInstitution } from '../src/plaid/sync.js';
 import { createMember } from '../src/scripts/admin.js';
+import { createApp } from '../src/http/app.js';
 import { account, FakePlaid, testDb, testKey, txn } from './helpers.js';
 
 async function setup() {
@@ -59,5 +60,17 @@ describe('sync', () => {
     await syncInstitution(db, plaid, kp, inst);
     const { rows } = await db.query<{ visibility: string }>(`SELECT visibility FROM accounts`);
     expect(rows[0]!.visibility).toBe('private');
+  });
+
+  it('a verified webhook hands its sync to the background hook (ctx.waitUntil on Workers)', async () => {
+    const { db, kp, plaid } = await setup();
+    const background: Promise<unknown>[] = [];
+    const app = createApp({ db, kp, plaid, verifyWebhook: async () => true, background: (w) => background.push(w) });
+    const body = JSON.stringify({ webhook_type: 'TRANSACTIONS', webhook_code: 'SYNC_UPDATES_AVAILABLE', item_id: 'item-1' });
+    const res = await app.fetch(new Request('http://vault.test/plaid/webhook', { method: 'POST', body }));
+    expect(res.status).toBe(200);
+    expect(background).toHaveLength(1);
+    await Promise.all(background);
+    expect(plaid.seenTokens).toEqual(['access-secret']);
   });
 });

@@ -1,0 +1,52 @@
+name: Deploy to Cloudflare
+
+# Off until you turn it on: set the repository variable PURSER_DEPLOY to "enabled"
+# (Settings > Secrets and variables > Actions > Variables). See README "Deploy to Cloudflare".
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: vars.PURSER_DEPLOY == 'enabled'
+    runs-on: ubuntu-latest
+    # Add required reviewers to this environment if you want to approve each deploy.
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Point wrangler.jsonc at the Hyperdrive config
+        env:
+          HYPERDRIVE_ID: ${{ vars.HYPERDRIVE_ID }}
+        run: |
+          if ! grep -q REPLACE_WITH_HYPERDRIVE_ID wrangler.jsonc; then exit 0; fi
+          if [ -z "$HYPERDRIVE_ID" ]; then echo "::error::Set the HYPERDRIVE_ID repository variable"; exit 1; fi
+          sed -i "s/REPLACE_WITH_HYPERDRIVE_ID/$HYPERDRIVE_ID/" wrangler.jsonc
+
+      # Migrations run from Node over a direct connection, before the new code goes live.
+      # Every migration so far is additive, so the old Worker keeps working in between.
+      - name: Migrate database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run migrate
+
+      - name: Deploy Worker
+        run: npx wrangler deploy

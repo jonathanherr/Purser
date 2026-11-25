@@ -1,6 +1,3 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
 import pg from 'pg';
 
 /**
@@ -16,8 +13,12 @@ export interface Db {
   close(): Promise<void>;
 }
 
-export function pgDb(connectionString: string): Db {
-  const pool = new pg.Pool({ connectionString, max: 10 });
+/**
+ * On Node one pool lives for the whole process. On Workers, open one per request (through
+ * Hyperdrive, which does the real pooling) with a small max, and close it when the request ends.
+ */
+export function pgDb(connectionString: string, opts: { max?: number } = {}): Db {
+  const pool = new pg.Pool({ connectionString, max: opts.max ?? 10 });
   // Return numerics as strings would leak into JSON as strings; parse them to numbers.
   pg.types.setTypeParser(1700, (v) => Number(v));
   pg.types.setTypeParser(20, (v) => Number(v));
@@ -50,27 +51,4 @@ export function pgDb(connectionString: string): Db {
     },
     close: () => pool.end(),
   };
-}
-
-const MIGRATIONS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../migrations');
-
-export async function migrate(db: Db, dir = MIGRATIONS_DIR): Promise<string[]> {
-  await db.exec(
-    'CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())',
-  );
-  const applied = new Set(
-    (await db.query<{ name: string }>('SELECT name FROM schema_migrations')).rows.map((r) => r.name),
-  );
-  const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
-  const ran: string[] = [];
-  for (const file of files) {
-    if (applied.has(file)) continue;
-    const sql = await readFile(path.join(dir, file), 'utf8');
-    await db.tx(async (t) => {
-      await t.exec(sql);
-      await t.query('INSERT INTO schema_migrations (name) VALUES ($1)', [file]);
-    });
-    ran.push(file);
-  }
-  return ran;
 }

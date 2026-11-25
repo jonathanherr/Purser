@@ -1,6 +1,7 @@
 import { parseArgs } from 'node:util';
 import { runtime } from '../runtime.js';
-import { migrate } from '../db/index.js';
+import { migrate } from '../db/migrate.js';
+import { pgDb } from '../db/index.js';
 import { AGENT_PRESETS, createAgent, createMember } from './admin.js';
 import { linkSandboxInstitution } from '../plaid/link.js';
 import { syncAll } from '../plaid/sync.js';
@@ -29,14 +30,22 @@ const { values } = parseArgs({
   },
 });
 
+// Migrations need only the database, so the deploy workflow never has to hold the master key.
+if (command === 'migrate') {
+  if (!process.env.DATABASE_URL) throw new Error('Set DATABASE_URL');
+  const db = pgDb(process.env.DATABASE_URL, { max: 1 });
+  try {
+    const ran = await migrate(db);
+    console.log(ran.length ? `applied ${ran.join(', ')}` : 'up to date');
+  } finally {
+    await db.close();
+  }
+  process.exit(0);
+}
+
 const rt = runtime({ requirePlaid: command === 'sandbox:link' || command === 'sync' });
 try {
   switch (command) {
-    case 'migrate': {
-      const ran = await migrate(rt.db);
-      console.log(ran.length ? `applied ${ran.join(', ')}` : 'up to date');
-      break;
-    }
     case 'member:create': {
       if (!values.id || !values.name) throw new Error('--id and --name are required');
       const role = values.role === 'owner' ? 'owner' : 'member';

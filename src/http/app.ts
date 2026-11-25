@@ -20,6 +20,11 @@ export interface AppDeps {
   plaidWebhookUrl?: string;
   /** Tests can replace webhook verification. Production always uses Plaid's signed JWT. */
   verifyWebhook?: (rawBody: string, jwt: string | undefined) => Promise<boolean>;
+  /**
+   * Runs work after the response is sent. On Node a dangling promise is fine; on Workers it
+   * must go to ctx.waitUntil or the runtime cancels it when the response returns.
+   */
+  background?: (work: Promise<unknown>) => void;
 }
 
 type Env = { Variables: { member: Member } };
@@ -64,7 +69,11 @@ export function createApp(deps: AppDeps) {
       const { rows } = await db.query<{ id: string }>(`SELECT id FROM institutions WHERE plaid_item_id = $1`, [body.item_id]);
       const id = rows[0]?.id;
       // Answer Plaid quickly; the sync runs in the background.
-      if (id) void syncInstitution(db, deps.plaid, kp, id).catch((e) => console.error('webhook sync failed', e));
+      if (id) {
+        const work = syncInstitution(db, deps.plaid, kp, id).catch((e) => console.error('webhook sync failed', e));
+        if (deps.background) deps.background(work);
+        else void work;
+      }
     }
     return c.json({ ok: true });
   });

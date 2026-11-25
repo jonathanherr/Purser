@@ -1,0 +1,44 @@
+// Cloudflare Workers deploy for the Purser vault. See README "Deploy to Cloudflare".
+// No secrets in this file: PLAID_CLIENT_ID, PLAID_SECRET and VAULT_MASTER_KEY are set with
+// `wrangler secret put`, and the database credentials live inside the Hyperdrive config.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "purser-vault",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Postgres through Hyperdrive. Create it once with:
+  //   npx wrangler hyperdrive create purser-db --connection-string="postgres://..."
+  // and paste the printed id below. The id is not a secret.
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "REPLACE_WITH_HYPERDRIVE_ID",
+      // Used by `wrangler dev` only.
+      "localConnectionString": "postgres://purser:purser@localhost:5432/purser"
+    }
+  ],
+
+  "vars": {
+    "PLAID_ENV": "sandbox"
+    // PLAID_WEBHOOK_URL: set once the public URL is known, e.g.
+    // "https://purser-vault.<your-subdomain>.workers.dev/plaid/webhook"
+  },
+
+  // Replaces the Node process's timers. Keep the first in sync with EXPIRY_CRON in src/worker.ts.
+  "triggers": {
+    "crons": [
+      "*/15 * * * *", // expire stale proposals
+      "0 */6 * * *" // backstop Plaid sync in case a webhook is missed
+    ]
+  },
+
+  // The vault is not reachable until you choose to expose it: no workers.dev URL and no
+  // preview URLs. Flip workers_dev to true (or add a route) when you're ready for Plaid
+  // webhooks and remote agents to reach it.
+  "workers_dev": false,
+  "preview_urls": false,
+
+  "observability": { "enabled": true }
+}

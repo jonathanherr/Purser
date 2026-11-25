@@ -59,16 +59,82 @@ Bearer member token. Passkeys replace these in phase 1c.
 
 `POST /plaid/webhook` accepts Plaid webhooks, verified against Plaid's signed JWT, and triggers a sync.
 
+## Deploy to Cloudflare
+
+The vault runs as a Cloudflare Worker (`src/worker.ts`, config in `wrangler.jsonc`). Postgres stays
+Postgres: the Worker reaches it through **Hyperdrive**, so the schema and every query are unchanged.
+The Node entry (`src/index.ts`) is still what `npm run dev` uses.
+
+| Node process | Worker |
+| --- | --- |
+| One `pg` pool for the process | A small pool per request through Hyperdrive, closed when the request ends |
+| `setInterval` sync and expiry | Cron Triggers: expiry every 15 minutes, Plaid sync every 6 hours |
+| Migrations at start-up | `npm run migrate` in the deploy workflow, before `wrangler deploy` |
+| Background webhook sync | `ctx.waitUntil` |
+
+Everything here fits the Workers Free plan (Hyperdrive is included, 100k queries a day). The
+Postgres database is hosted elsewhere (Neon, Supabase, PlanetScale Postgres, or your own).
+
+The Worker ships with no public URL (`workers_dev: false`, `preview_urls: false`). Turn one on
+when you want Plaid webhooks and remote agents to reach it.
+
+### One-time setup
+
+```sh
+# 1. A Postgres database, then run the schema against it
+DATABASE_URL="postgres://..." npm run migrate
+
+# 2. Hyperdrive in front of it; paste the printed id into wrangler.jsonc
+#    (or into the HYPERDRIVE_ID repository variable, which the workflow substitutes)
+npx wrangler hyperdrive create purser-db --connection-string="postgres://..."
+
+# 3. Worker secrets. Stored by Cloudflare, never in the repo or in GitHub
+npx wrangler secret put VAULT_MASTER_KEY     # 32 random bytes, base64
+npx wrangler secret put PLAID_CLIENT_ID      # sandbox keys
+npx wrangler secret put PLAID_SECRET
+
+# 4. First deploy
+npx wrangler deploy
+```
+
+Create members and agents from your machine with `DATABASE_URL` pointing at the same database
+(`npm run purser -- member:create ...`). Admin commands are never exposed over HTTP.
+
+### Deploying from GitHub Actions
+
+`.github/workflows/deploy.yml` tests, migrates and deploys on every push to `main`. It does
+nothing until you turn it on:
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Variable | `PURSER_DEPLOY` | `enabled` |
+| Variable | `HYPERDRIVE_ID` | the id from step 2 (skip if you committed it) |
+| Secret | `CLOUDFLARE_API_TOKEN` | a token with **Workers Scripts: Edit** on your account |
+| Secret | `CLOUDFLARE_ACCOUNT_ID` | your account id |
+| Secret | `DATABASE_URL` | direct Postgres URL, used only for migrations |
+
+The master key and Plaid keys are not GitHub secrets: they live only in the Worker. Add required
+reviewers to the `production` environment if you want to approve each deploy.
+
+### Local Worker
+
+```sh
+echo "VAULT_MASTER_KEY=..." > .dev.vars   # git-ignored; add PLAID_* too if you have them
+npx wrangler dev                          # uses localConnectionString from wrangler.jsonc
+```
+
 ## Tests
 
 ```sh
 npm test          # Vitest with PGlite (in-process Postgres); no network or Plaid keys needed
 npm run typecheck
+npx wrangler deploy --dry-run --outdir dist   # bundles the Worker, uploads nothing
 ```
 
 ## Not yet done
 
-- KMS key provider (the `KeyProvider` interface is ready; `LocalKeyProvider` is for dev only)
+- KMS key provider (the `KeyProvider` interface is ready; `LocalKeyProvider` is for dev only, and the
+  Worker uses it too, with the master key as a Worker secret, until a KMS provider exists)
 - Passkey sign-in and the approval PWA
 - The agents themselves and the weekly digest (phase 1b)
 - Executors for transfers and trades (phase 2). Keep them in a separate deploy with separate credentials
