@@ -1,0 +1,64 @@
+name: Vault admin
+
+# One-off admin commands against the production D1 database, run by hand from the Actions tab.
+# Uses the same repository secrets as the deploy. Nothing secret is printed: sandbox-link and
+# sync print only ids and row counts.
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: What to run
+        type: choice
+        options: [sandbox-link, sync]
+        default: sync
+      member:
+        description: Member who owns the linked sandbox bank (sandbox-link only)
+        default: jonathan
+      institution:
+        description: Plaid sandbox institution (sandbox-link only)
+        default: ins_109508
+
+concurrency:
+  group: vault-admin
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  admin:
+    if: vars.PURSER_DEPLOY == 'enabled'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      VAULT_MASTER_KEY: ${{ secrets.VAULT_MASTER_KEY }}
+      PLAID_CLIENT_ID: ${{ secrets.PLAID_CLIENT_ID }}
+      PLAID_SECRET: ${{ secrets.PLAID_SECRET }}
+      PURSER_DB: remote
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Find D1 database
+        id: d1
+        run: npx tsx src/scripts/ensure-d1.ts
+
+      - name: Link a Plaid sandbox bank
+        if: inputs.command == 'sandbox-link'
+        env:
+          D1_DATABASE_ID: ${{ steps.d1.outputs.id }}
+          MEMBER: ${{ inputs.member }}
+          INSTITUTION: ${{ inputs.institution }}
+        run: npx tsx src/scripts/cli.ts sandbox:link --member "$MEMBER" --institution "$INSTITUTION"
+
+      - name: Sync every linked bank
+        if: inputs.command == 'sync'
+        env:
+          D1_DATABASE_ID: ${{ steps.d1.outputs.id }}
+        run: npx tsx src/scripts/cli.ts sync
