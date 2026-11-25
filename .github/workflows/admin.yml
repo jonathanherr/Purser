@@ -2,21 +2,25 @@ name: Vault admin
 
 # One-off admin commands against the production D1 database, run by hand from the Actions tab.
 # Uses the same repository secrets as the deploy. Nothing secret is printed: sandbox-link and
-# sync print only ids and row counts.
+# sync print only ids and row counts, and connect-approve prints only who was approved.
+# The repo is public, so never add a command here that prints a token.
 on:
   workflow_dispatch:
     inputs:
       command:
         description: What to run
         type: choice
-        options: [sandbox-link, sync]
+        options: [sandbox-link, sync, connect-approve]
         default: sync
       member:
-        description: Member who owns the linked sandbox bank (sandbox-link only)
+        description: Member to link a bank for (sandbox-link) or to connect as (connect-approve)
         default: jonathan
       institution:
         description: Plaid sandbox institution (sandbox-link only)
         default: ins_109508
+      code:
+        description: Pairing code from the Purser sign-in page (connect-approve only)
+        default: ''
 
 concurrency:
   group: vault-admin
@@ -62,3 +66,11 @@ jobs:
         env:
           D1_DATABASE_ID: ${{ steps.d1.outputs.id }}
         run: npx tsx src/scripts/cli.ts sync
+
+      - name: Approve a connector sign-in
+        if: inputs.command == 'connect-approve'
+        env:
+          D1_DATABASE_ID: ${{ steps.d1.outputs.id }}
+          MEMBER: ${{ inputs.member }}
+          CODE: ${{ inputs.code }}
+        run: npx tsx src/scripts/cli.ts connect:approve --code "$CODE" --member "$MEMBER"

@@ -116,6 +116,22 @@ master key stays in the Worker. While the Worker has no public URL, run the **Va
 workflow from the Actions tab instead: `sandbox-link` links a Plaid test bank for a member and
 runs a first sync, and `sync` syncs every linked bank. It uses the deploy's repository secrets.
 
+### Connect Claude (custom connector)
+
+The vault's MCP endpoint is an OAuth-protected remote MCP server, so it can be added to Claude
+as a custom connector. Connections are **read-only** (accounts, transactions, investments,
+budgets, flags) and act for one member, so visibility rules apply as usual.
+
+1. In Claude, add a custom connector with the URL `https://<vault host>/mcp`.
+2. Claude opens a Purser page with a pairing code such as `K7QM-3XPA`.
+3. Approve it within 15 minutes: Actions → **Vault admin** → `connect-approve`, with the code
+   and your member id. The page then continues by itself and Claude is connected.
+
+No secret is ever typed or sent anywhere: the pairing code only identifies the waiting sign-in,
+and only someone who can run the repo's workflows can approve it. Each connection is an
+`agent_clients` row named `connector-<member>-…`; set its `revoked_at` to disconnect it. Only
+Claude's own callback URLs can register (see `src/http/oauth.ts`).
+
 ### Local Worker
 
 ```sh
