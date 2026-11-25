@@ -55,7 +55,7 @@ describe('MCP over HTTP', () => {
   it('a revoked agent is locked out', async () => {
     const { app, db, agentToken } = await setup();
     const { token, agent } = await agentToken('watchdog', 'household');
-    await db.query(`UPDATE agent_clients SET revoked_at = now() WHERE id = $1`, [agent.id]);
+    await db.query(`UPDATE agent_clients SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1`, [agent.id]);
     await expect(connect(app, token)).rejects.toThrow();
   });
 });

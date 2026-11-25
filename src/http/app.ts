@@ -1,7 +1,7 @@
 import { Hono, type Context } from 'hono';
 import { z } from 'zod';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
-import type { Db } from '../db/index.js';
+import { json, NOW, type Db } from '../db/index.js';
 import type { KeyProvider } from '../crypto/envelope.js';
 import type { PlaidLike } from '../plaid/client.js';
 import { authenticateAgent, authenticateMember, parseBearer, type Member } from '../vault/auth.js';
@@ -66,7 +66,7 @@ export function createApp(deps: AppDeps) {
       (body.webhook_type === 'TRANSACTIONS' && body.webhook_code === 'SYNC_UPDATES_AVAILABLE') ||
       (body.webhook_type === 'HOLDINGS' && body.webhook_code === 'DEFAULT_UPDATE');
     if (triggers && body.item_id && deps.plaid) {
-      const { rows } = await db.query<{ id: string }>(`SELECT id FROM institutions WHERE plaid_item_id = $1`, [body.item_id]);
+      const { rows } = await db.query<{ id: string }>(`SELECT id FROM institutions WHERE plaid_item_id = ?1`, [body.item_id]);
       const id = rows[0]?.id;
       // Answer Plaid quickly; the sync runs in the background.
       if (id) {
@@ -89,17 +89,18 @@ export function createApp(deps: AppDeps) {
 
   people.get('/proposals', async (c) => {
     const status = c.req.query('status') ?? 'pending';
-    const { rows } = await db.query<{ id: string; kind: string; payload: unknown; reason: string; status: string; approvals_required: number; expires_at: Date; agent: string }>(
+    const { rows } = await db.query<{ id: string; kind: string; payload: string; reason: string; status: string; approvals_required: number; expires_at: string; agent: string }>(
       `SELECT p.id, p.kind, p.payload, p.reason, p.status, p.approvals_required, p.expires_at, ac.name AS agent
          FROM proposals p JOIN agent_clients ac ON ac.id = p.agent_id
-        WHERE p.status = $1 ORDER BY p.created_at DESC LIMIT 100`,
+        WHERE p.status = ?1 ORDER BY p.created_at DESC LIMIT 100`,
       [status],
     );
     const out = [];
     for (const r of rows) {
       // People see the vault's own rendering of the action, built from structured fields.
       // The agent's free-text reason is shown separately and labelled as such.
-      out.push({ ...r, summary: await renderProposal(db, r.payload), agent_reason: r.reason });
+      const payload = json(r.payload);
+      out.push({ ...r, payload, summary: await renderProposal(db, payload), agent_reason: r.reason });
     }
     return c.json(out);
   });
@@ -121,7 +122,7 @@ export function createApp(deps: AppDeps) {
     const id = c.req.param('id');
     if (!z.string().uuid().safeParse(id).success) return c.json({ error: 'not_found' }, 404);
     const { rows } = await db.query(
-      `UPDATE accounts SET visibility = $3, updated_at = now() WHERE id = $1 AND owner_member_id = $2 RETURNING id`,
+      `UPDATE accounts SET visibility = ?3, updated_at = ${NOW} WHERE id = ?1 AND owner_member_id = ?2 RETURNING id`,
       [id, member.id, body.data.visibility],
     );
     await audit(db, {

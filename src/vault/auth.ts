@@ -1,4 +1,4 @@
-import type { Db } from '../db/index.js';
+import { json, type Db } from '../db/index.js';
 import { hashToken } from '../crypto/tokens.js';
 
 export const SCOPES = [
@@ -36,8 +36,8 @@ export function parseBearer(header: string | undefined | null): string | null {
 
 export async function authenticateAgent(db: Db, token: string | null): Promise<AgentClient | null> {
   if (!token) return null;
-  const { rows } = await db.query<{ id: string; name: string; scopes: string[]; acts_for: string }>(
-    `SELECT id, name, scopes, acts_for FROM agent_clients WHERE token_hash = $1 AND revoked_at IS NULL`,
+  const { rows } = await db.query<{ id: string; name: string; scopes: string; acts_for: string }>(
+    `SELECT id, name, scopes, acts_for FROM agent_clients WHERE token_hash = ?1 AND revoked_at IS NULL`,
     [hashToken(token)],
   );
   const r = rows[0];
@@ -45,7 +45,7 @@ export async function authenticateAgent(db: Db, token: string | null): Promise<A
   return {
     id: r.id,
     name: r.name,
-    scopes: r.scopes.filter((s): s is Scope => (SCOPES as readonly string[]).includes(s)),
+    scopes: json<string[]>(r.scopes).filter((s): s is Scope => (SCOPES as readonly string[]).includes(s)),
     viewer: r.acts_for === 'household' ? { kind: 'household' } : { kind: 'member', memberId: r.acts_for },
   };
 }
@@ -53,7 +53,7 @@ export async function authenticateAgent(db: Db, token: string | null): Promise<A
 export async function authenticateMember(db: Db, token: string | null): Promise<Member | null> {
   if (!token) return null;
   const { rows } = await db.query<{ id: string; display_name: string; role: 'owner' | 'member' }>(
-    `SELECT id, display_name, role FROM members WHERE token_hash = $1`,
+    `SELECT id, display_name, role FROM members WHERE token_hash = ?1`,
     [hashToken(token)],
   );
   const r = rows[0];

@@ -1,8 +1,8 @@
-import { PGlite, type Transaction as PGTx } from '@electric-sql/pglite';
 import { randomBytes } from 'node:crypto';
 import type { Plaid } from 'plaid';
 import type { JWK } from 'jose';
 import type { Db } from '../src/db/index.js';
+import { sqliteDb } from '../src/db/sqlite.js';
 import { migrate } from '../src/db/migrate.js';
 import { LocalKeyProvider } from '../src/crypto/envelope.js';
 import type { PlaidLike } from '../src/plaid/client.js';
@@ -10,27 +10,9 @@ import { createAgent, createMember, AGENT_PRESETS } from '../src/scripts/admin.j
 import { storeInstitution, syncInstitution } from '../src/plaid/sync.js';
 import { authenticateAgent } from '../src/vault/auth.js';
 
-const parsers = { 1700: (v: string) => Number(v), 20: (v: string) => Number(v) };
-
-/** An in-process Postgres (PGlite) behind the same Db interface the vault uses in production. */
+/** An in-memory SQLite database (the same SQL dialect as D1) behind the vault's Db interface. */
 export async function testDb(): Promise<Db> {
-  const pg = await PGlite.create({ parsers });
-  const fromTx = (tx: PGTx): Db => ({
-    query: async (sql, params) => ({ rows: (await tx.query(sql, params as unknown[])).rows as never[] }),
-    exec: async (sql) => {
-      await tx.exec(sql);
-    },
-    tx: (fn) => fn(fromTx(tx)),
-    close: async () => {},
-  });
-  const db: Db = {
-    query: async (sql, params) => ({ rows: (await pg.query(sql, params as unknown[])).rows as never[] }),
-    exec: async (sql) => {
-      await pg.exec(sql);
-    },
-    tx: (fn) => pg.transaction((tx) => fn(fromTx(tx))),
-    close: () => pg.close(),
-  };
+  const db = sqliteDb(':memory:');
   await migrate(db);
   return db;
 }

@@ -19,7 +19,7 @@ export interface AuditEntry {
 export async function audit(db: Db, e: AuditEntry): Promise<void> {
   await db.query(
     `INSERT INTO audit_log (actor_type, actor_id, action, args_hash, outcome, result_rows, detail)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
     [
       e.actor.type,
       e.actor.id,

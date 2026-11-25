@@ -12,7 +12,7 @@ Architecture doc: https://claude.ai/artifact/8CUNYARkDSuECRkHCHsVoR
 
 | Part | Where | What it does |
 | --- | --- | --- |
-| Ledger | `migrations/001_init.sql` | Postgres schema: accounts, transactions, holdings, budgets, flags, proposals, append-only audit log |
+| Ledger | `migrations/0001_init.sql` | SQLite schema (Cloudflare D1 in production): accounts, transactions, holdings, budgets, flags, proposals, append-only audit log |
 | Sync | `src/plaid/sync.ts` | Cursor-based `/transactions/sync`, accounts and balances, investment holdings |
 | Secrets | `src/crypto/envelope.ts` | Plaid access tokens sealed with AES-256-GCM per-row data keys, wrapped by a master key (KMS in production) |
 | Visibility | `src/vault/visibility.ts` | Per-account `shared` / `private` / `hidden`, enforced in SQL on every query |
@@ -23,15 +23,15 @@ Architecture doc: https://claude.ai/artifact/8CUNYARkDSuECRkHCHsVoR
 
 ## Run it locally
 
-Needs Node 22 and a Postgres database. Get free sandbox keys from https://dashboard.plaid.com.
+Needs Node 22.13 or later (it uses Node's built-in SQLite). Get free sandbox keys from https://dashboard.plaid.com.
 
 ```sh
 npm install
-cp .env.example .env            # fill in DATABASE_URL, PLAID_CLIENT_ID, PLAID_SECRET
+cp .env.example .env            # fill in VAULT_MASTER_KEY, PLAID_CLIENT_ID, PLAID_SECRET
 # generate a master key:  node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 set -a; . ./.env; set +a
 
-npm run migrate
+npm run migrate                                                              # creates purser.db
 npm run purser -- member:create --id jonathan --name Jonathan --role owner   # prints a token once
 npm run purser -- sandbox:link --member jonathan                            # links First Platypus Bank (sandbox)
 npm run purser -- agent:create --id watchdog --acts-for jonathan             # prints the agent's MCP token once
@@ -61,72 +61,71 @@ Bearer member token. Passkeys replace these in phase 1c.
 
 ## Deploy to Cloudflare
 
-The vault runs as a Cloudflare Worker (`src/worker.ts`, config in `wrangler.jsonc`). Postgres stays
-Postgres: the Worker reaches it through **Hyperdrive**, so the schema and every query are unchanged.
-The Node entry (`src/index.ts`) is still what `npm run dev` uses.
+The vault runs as a Cloudflare Worker (`src/worker.ts`, config in `wrangler.jsonc`) on **D1**,
+Cloudflare's SQLite database. Local development and tests use Node's built-in SQLite, so the
+same SQL runs everywhere.
 
-| Node process | Worker |
+| Node (local) | Worker (production) |
 | --- | --- |
-| One `pg` pool for the process | A small pool per request through Hyperdrive, closed when the request ends |
+| SQLite file through `node:sqlite` | D1, bound as `env.DB` |
 | `setInterval` sync and expiry | Cron Triggers: expiry every 15 minutes, Plaid sync every 6 hours |
-| Migrations at start-up | `npm run migrate` in the deploy workflow, before `wrangler deploy` |
+| `npm run migrate` | `wrangler d1 migrations apply`, in the deploy workflow before each deploy |
 | Background webhook sync | `ctx.waitUntil` |
 
-Everything here fits the Workers Free plan (Hyperdrive is included, 100k queries a day). The
-Postgres database is hosted elsewhere (Neon, Supabase, PlanetScale Postgres, or your own).
+D1 has no interactive transactions. Writes that must land together (everything one Plaid sync
+writes, cursor included) go through `db.batch()`, which is atomic and counts as one query
+against D1's per-request limit. Approvals are single statements that are safe to race.
 
-The Worker ships with no public URL (`workers_dev: false`, `preview_urls: false`). Turn one on
-when you want Plaid webhooks and remote agents to reach it.
+Everything fits the Workers Free plan. The Worker ships with no public URL (`workers_dev: false`,
+`preview_urls: false`); turn one on when you want Plaid webhooks and remote agents to reach it.
 
-### One-time setup
+### Set up and deploy from GitHub Actions
 
-```sh
-# 1. A Postgres database, then run the schema against it
-DATABASE_URL="postgres://..." npm run migrate
-
-# 2. Hyperdrive in front of it; paste the printed id into wrangler.jsonc
-#    (or into the HYPERDRIVE_ID repository variable, which the workflow substitutes)
-npx wrangler hyperdrive create purser-db --connection-string="postgres://..."
-
-# 3. Worker secrets. Stored by Cloudflare, never in the repo or in GitHub
-npx wrangler secret put VAULT_MASTER_KEY     # 32 random bytes, base64
-npx wrangler secret put PLAID_CLIENT_ID      # sandbox keys
-npx wrangler secret put PLAID_SECRET
-
-# 4. First deploy
-npx wrangler deploy
-```
-
-Create members and agents from your machine with `DATABASE_URL` pointing at the same database
-(`npm run purser -- member:create ...`). Admin commands are never exposed over HTTP.
-
-### Deploying from GitHub Actions
-
-`.github/workflows/deploy.yml` tests, migrates and deploys on every push to `main`. It does
-nothing until you turn it on:
+`.github/workflows/deploy.yml` does the whole Cloudflare setup, and every step is safe to re-run:
+tests, find or create the `purser` D1 database, apply migrations, upload the Worker secrets, and
+deploy. It runs on every push to `main` (and by hand from the Actions tab), but only after you
+turn it on:
 
 | Kind | Name | Value |
 | --- | --- | --- |
-| Variable | `PURSER_DEPLOY` | `enabled` |
-| Variable | `HYPERDRIVE_ID` | the id from step 2 (skip if you committed it) |
-| Secret | `CLOUDFLARE_API_TOKEN` | a token with **Workers Scripts: Edit** on your account |
+| Secret | `CLOUDFLARE_API_TOKEN` | a token with **Workers Scripts: Edit** and **D1: Edit** on your account |
 | Secret | `CLOUDFLARE_ACCOUNT_ID` | your account id |
-| Secret | `DATABASE_URL` | direct Postgres URL, used only for migrations |
+| Secret | `VAULT_MASTER_KEY` | 32 random bytes, base64 (`node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`) |
+| Secret | `PLAID_CLIENT_ID`, `PLAID_SECRET` | sandbox keys (optional; without them Plaid is off) |
+| Variable | `PURSER_DEPLOY` | `enabled` |
 
-The master key and Plaid keys are not GitHub secrets: they live only in the Worker. Add required
-reviewers to the `production` environment if you want to approve each deploy.
+Then run the workflow from the Actions tab, or merge to `main`. Add required reviewers to the
+`production` environment if you want to approve each deploy.
+
+Keep a copy of `VAULT_MASTER_KEY` somewhere safe: it is the only way to open the Plaid access
+tokens stored in D1 (sandbox items can always be re-linked). It moves to a KMS in phase 1c.
+
+### Admin commands against production
+
+Members and agents are created from your machine, straight into D1 through Cloudflare's API.
+Admin commands are never exposed over HTTP.
+
+```sh
+export PURSER_DB=remote CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... D1_DATABASE_ID=...
+npm run purser -- member:create --id jonathan --name Jonathan --role owner
+npm run purser -- agent:create --id watchdog --acts-for jonathan
+```
+
+Link sandbox banks through the Worker (`POST /me/sandbox/link` with a member token), so the
+master key stays in the Worker.
 
 ### Local Worker
 
 ```sh
 echo "VAULT_MASTER_KEY=..." > .dev.vars   # git-ignored; add PLAID_* too if you have them
-npx wrangler dev                          # uses localConnectionString from wrangler.jsonc
+npx wrangler d1 migrations apply DB --local
+npx wrangler dev
 ```
 
 ## Tests
 
 ```sh
-npm test          # Vitest with PGlite (in-process Postgres); no network or Plaid keys needed
+npm test          # Vitest on in-memory SQLite, plus a suite on the real D1 engine (Miniflare); no network or Plaid keys
 npm run typecheck
 npx wrangler deploy --dry-run --outdir dist   # bundles the Worker, uploads nothing
 ```

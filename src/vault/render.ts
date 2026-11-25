@@ -4,7 +4,7 @@ import { ProposalPayload } from './proposals.js';
 const usd = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
 async function accountLabel(db: Db, id: string): Promise<string> {
-  const { rows } = await db.query<{ name: string; mask: string | null }>(`SELECT name, mask FROM accounts WHERE id = $1`, [id]);
+  const { rows } = await db.query<{ name: string; mask: string | null }>(`SELECT name, mask FROM accounts WHERE id = ?1`, [id]);
   const a = rows[0];
   return a ? `${a.name}${a.mask ? ` (…${a.mask})` : ''}` : 'an unknown account';
 }

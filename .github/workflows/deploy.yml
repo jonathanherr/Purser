@@ -1,7 +1,9 @@
 name: Deploy to Cloudflare
 
-# Off until you turn it on: set the repository variable PURSER_DEPLOY to "enabled"
-# (Settings > Secrets and variables > Actions > Variables). See README "Deploy to Cloudflare".
+# The whole Cloudflare setup runs here: D1 database, migrations, Worker secrets, deploy.
+# Every step is idempotent, so the first run sets things up and later runs just deploy.
+# Off until you turn it on: set the repository variable PURSER_DEPLOY to "enabled".
+# See README "Deploy to Cloudflare" for the secrets it needs.
 on:
   push:
     branches: [main]
@@ -33,20 +35,42 @@ jobs:
       - run: npm run typecheck
       - run: npm test
 
-      - name: Point wrangler.jsonc at the Hyperdrive config
+      - name: Check required secrets
         env:
-          HYPERDRIVE_ID: ${{ vars.HYPERDRIVE_ID }}
+          VAULT_MASTER_KEY: ${{ secrets.VAULT_MASTER_KEY }}
         run: |
-          if ! grep -q REPLACE_WITH_HYPERDRIVE_ID wrangler.jsonc; then exit 0; fi
-          if [ -z "$HYPERDRIVE_ID" ]; then echo "::error::Set the HYPERDRIVE_ID repository variable"; exit 1; fi
-          sed -i "s/REPLACE_WITH_HYPERDRIVE_ID/$HYPERDRIVE_ID/" wrangler.jsonc
+          missing=0
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID VAULT_MASTER_KEY; do
+            if [ -z "${!v}" ]; then echo "::error::Missing repository secret $v"; missing=1; fi
+          done
+          exit $missing
 
-      # Migrations run from Node over a direct connection, before the new code goes live.
-      # Every migration so far is additive, so the old Worker keeps working in between.
+      # Finds the "purser" D1 database, creating it on the first run, and points wrangler at it.
+      - name: Ensure D1 database
+        id: d1
+        run: npx tsx src/scripts/ensure-d1.ts
+
+      - name: Point wrangler.jsonc at it
+        run: sed -i "s/REPLACE_WITH_D1_DATABASE_ID/${{ steps.d1.outputs.id }}/" wrangler.jsonc
+
+      # Applies any new files in migrations/ before the new code goes live. Every migration so
+      # far is additive, so the old Worker keeps working in between.
       - name: Migrate database
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: npm run migrate
+        run: npx wrangler d1 migrations apply DB --remote
 
+      # Secrets go to the Worker with the deploy, from a temp file that never leaves the runner.
+      # PLAID_* are optional: without them the vault runs with Plaid disabled.
       - name: Deploy Worker
-        run: npx wrangler deploy
+        env:
+          VAULT_MASTER_KEY: ${{ secrets.VAULT_MASTER_KEY }}
+          PLAID_CLIENT_ID: ${{ secrets.PLAID_CLIENT_ID }}
+          PLAID_SECRET: ${{ secrets.PLAID_SECRET }}
+        run: |
+          secrets_file="$RUNNER_TEMP/worker-secrets.json"
+          node -e '
+            const keys = ["VAULT_MASTER_KEY", "PLAID_CLIENT_ID", "PLAID_SECRET"];
+            const out = Object.fromEntries(keys.filter((k) => process.env[k]).map((k) => [k, process.env[k]]));
+            require("fs").writeFileSync(process.argv[1], JSON.stringify(out), { mode: 0o600 });
+          ' "$secrets_file"
+          npx wrangler deploy --secrets-file "$secrets_file"
+          rm -f "$secrets_file"

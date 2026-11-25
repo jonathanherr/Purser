@@ -1,6 +1,6 @@
 // Cloudflare Workers deploy for the Purser vault. See README "Deploy to Cloudflare".
-// No secrets in this file: PLAID_CLIENT_ID, PLAID_SECRET and VAULT_MASTER_KEY are set with
-// `wrangler secret put`, and the database credentials live inside the Hyperdrive config.
+// No secrets in this file: PLAID_CLIENT_ID, PLAID_SECRET and VAULT_MASTER_KEY are uploaded by
+// the deploy workflow from GitHub secrets (or with `wrangler secret put`).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "purser-vault",
@@ -8,15 +8,15 @@
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
 
-  // Postgres through Hyperdrive. Create it once with:
-  //   npx wrangler hyperdrive create purser-db --connection-string="postgres://..."
-  // and paste the printed id below. The id is not a secret.
-  "hyperdrive": [
+  // D1 (SQLite). The deploy workflow finds or creates the "purser" database and fills in its
+  // id, so nothing needs to be created by hand. To deploy from your own machine instead, run
+  // `npx wrangler d1 create purser` and paste the id here (the id is not a secret).
+  "d1_databases": [
     {
-      "binding": "HYPERDRIVE",
-      "id": "REPLACE_WITH_HYPERDRIVE_ID",
-      // Used by `wrangler dev` only.
-      "localConnectionString": "postgres://purser:purser@localhost:5432/purser"
+      "binding": "DB",
+      "database_name": "purser",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
     }
   ],
 
