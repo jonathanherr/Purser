@@ -47,7 +47,7 @@ export function createApp(deps: AppDeps) {
         'WWW-Authenticate': `Bearer realm="purser", resource_metadata="${resourceMetadataUrl(c.req.url)}"`,
       });
     }
-    const server = buildMcpServer(db, agent);
+    const server = buildMcpServer(db, agent, kp.fields);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -105,7 +105,7 @@ export function createApp(deps: AppDeps) {
       // People see the vault's own rendering of the action, built from structured fields.
       // The agent's free-text reason is shown separately and labelled as such.
       const payload = json(r.payload);
-      out.push({ ...r, payload, summary: await renderProposal(db, payload), agent_reason: r.reason });
+      out.push({ ...r, payload, summary: await renderProposal(db, kp.fields, payload), agent_reason: r.reason });
     }
     return c.json(out);
   });

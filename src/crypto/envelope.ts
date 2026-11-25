@@ -1,4 +1,6 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
+import { aesGcmDecrypt, aesGcmEncrypt } from './aes.js';
+import { FieldCipher } from './fields.js';
 
 /**
  * Envelope encryption for secrets at rest (Plaid access tokens).
@@ -9,6 +11,8 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
  */
 export interface KeyProvider {
   readonly keyId: string;
+  /** Encrypts ledger fields (amounts, merchants, balances) at rest. See ./fields.ts. */
+  readonly fields: FieldCipher;
   wrap(dek: Buffer): Promise<string>;
   unwrap(wrapped: string, keyId: string): Promise<Buffer>;
 }
@@ -19,29 +23,13 @@ export interface SealedSecret {
   keyId: string;
 }
 
-function aesGcmEncrypt(key: Buffer, plaintext: Buffer, aad: string): string {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  cipher.setAAD(Buffer.from(aad));
-  const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  return [iv, cipher.getAuthTag(), ct].map((b) => b.toString('base64')).join('.');
-}
-
-function aesGcmDecrypt(key: Buffer, sealed: string, aad: string): Buffer {
-  const [iv, tag, ct] = sealed.split('.').map((s) => Buffer.from(s, 'base64'));
-  if (!iv || !tag || !ct) throw new Error('malformed ciphertext');
-  const decipher = createDecipheriv('aes-256-gcm', key, iv);
-  decipher.setAAD(Buffer.from(aad));
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(ct), decipher.final()]);
-}
-
 /**
  * Wraps data keys with a local master key from the environment. For development and tests only;
  * deploy with a KMS-backed provider (see KmsKeyProvider below).
  */
 export class LocalKeyProvider implements KeyProvider {
   readonly keyId: string;
+  readonly fields: FieldCipher;
   private readonly master: Buffer;
 
   constructor(masterKeyBase64: string, keyId = 'local-v1') {
@@ -49,6 +37,7 @@ export class LocalKeyProvider implements KeyProvider {
     if (key.length !== 32) throw new Error('VAULT_MASTER_KEY must be 32 bytes, base64-encoded');
     this.master = key;
     this.keyId = keyId;
+    this.fields = FieldCipher.fromMaster(key);
   }
 
   async wrap(dek: Buffer): Promise<string> {

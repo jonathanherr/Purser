@@ -38,10 +38,10 @@ describe('sync', () => {
     const second = await syncInstitution(db, plaid, kp, inst);
     expect(second).toMatchObject({ modified: 1, removed: 1 });
 
-    const live = await db.query<{ plaid_transaction_id: string; amount: number }>(
-      `SELECT plaid_transaction_id, amount FROM transactions WHERE removed_at IS NULL`,
+    const live = await db.query<{ plaid_transaction_id: string; sealed: string }>(
+      `SELECT plaid_transaction_id, sealed FROM transactions WHERE removed_at IS NULL`,
     );
-    expect(live.rows).toEqual([{ plaid_transaction_id: 't1', amount: 12.5 }]);
+    expect(live.rows.map((r) => [r.plaid_transaction_id, kp.fields.open<{ amount: number }>(r.sealed, `transaction:${r.plaid_transaction_id}`).amount])).toEqual([['t1', 12.5]]);
     const cursor = await db.query<{ transactions_cursor: string }>(`SELECT transactions_cursor FROM institutions`);
     expect(cursor.rows[0]!.transactions_cursor).toBe('c2');
   });

@@ -140,6 +140,22 @@ npx wrangler d1 migrations apply DB --local
 npx wrangler dev
 ```
 
+## Data at rest
+
+- **Encrypted ledger.** Amounts, merchant names, account names and numbers, balances and
+  positions are stored as one AES-256-GCM ciphertext per row (`sealed` columns), with a key
+  derived from `VAULT_MASTER_KEY`. Ids, dates, categories and account types stay in the clear so
+  the vault can find rows. Each ciphertext is bound to its row. Plaid access tokens were already
+  envelope-encrypted. See `src/crypto/fields.ts`.
+- **13 months of history.** Older transactions are never stored, and the scheduled sync prunes
+  transactions, balance history and holdings snapshots as they age out.
+- **What this protects against:** a database export or backup, a leaked D1 API token, or anyone
+  browsing D1 in the Cloudflare dashboard. **What it doesn't:** someone in control of the whole
+  Cloudflare account, who could deploy code that reads the Worker's secret. A KMS key provider
+  outside Cloudflare closes that gap (see "Not yet done").
+- Totals and budgets are computed in the Worker after decrypting. A year of a household's
+  transactions is a few thousand rows, which decrypts in a few milliseconds.
+
 ## Tests
 
 ```sh
