@@ -1,0 +1,20 @@
+# Fly.io deploy (phase 1c). Secrets: fly secrets set DATABASE_URL=... PLAID_CLIENT_ID=... PLAID_SECRET=... VAULT_MASTER_KEY=...
+app = "purser-vault"
+primary_region = "iad"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  auto_stop_machines = "off"   # the sync schedule runs in-process
+  min_machines_running = 1
+
+[checks.health]
+  type = "http"
+  port = 8787
+  path = "/healthz"
+  interval = "30s"
+  timeout = "5s"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
