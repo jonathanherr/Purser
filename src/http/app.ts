@@ -7,6 +7,7 @@ import type { PlaidLike } from '../plaid/client.js';
 import { authenticateAgent, authenticateMember, parseBearer, type Member } from '../vault/auth.js';
 import { audit } from '../vault/audit.js';
 import { buildMcpServer } from '../mcp/server.js';
+import { oauthRoutes, resourceMetadataUrl } from './oauth.js';
 import { decide } from '../vault/proposals.js';
 import { renderProposal } from '../vault/render.js';
 import { verifyPlaidWebhook } from '../plaid/webhook.js';
@@ -34,15 +35,19 @@ export function createApp(deps: AppDeps) {
   const app = new Hono<Env>();
 
   app.get('/healthz', (c) => c.json({ ok: true }));
+  app.route('/', oauthRoutes(db));
 
   // ---- Agents: MCP over Streamable HTTP, stateless, one server per request ----
   app.all('/mcp', async (c) => {
     const agent = await authenticateAgent(db, parseBearer(c.req.header('authorization')));
     if (!agent) {
       await audit(db, { actor: { type: 'agent', id: 'unknown' }, action: 'mcp.auth', outcome: 'denied' });
-      return c.json({ error: 'unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer realm="purser"' });
+      // Points OAuth clients (Claude connectors) at the sign-in flow in ./oauth.ts.
+      return c.json({ error: 'unauthorized' }, 401, {
+        'WWW-Authenticate': `Bearer realm="purser", resource_metadata="${resourceMetadataUrl(c.req.url)}"`,
+      });
     }
-    const server = buildMcpServer(db, agent);
+    const server = buildMcpServer(db, agent, kp.fields);
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -100,7 +105,7 @@ export function createApp(deps: AppDeps) {
       // People see the vault's own rendering of the action, built from structured fields.
       // The agent's free-text reason is shown separately and labelled as such.
       const payload = json(r.payload);
-      out.push({ ...r, payload, summary: await renderProposal(db, payload), agent_reason: r.reason });
+      out.push({ ...r, payload, summary: await renderProposal(db, kp.fields, payload), agent_reason: r.reason });
     }
     return c.json(out);
   });

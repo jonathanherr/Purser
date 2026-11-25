@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { TOOLS, toolsFor, type ToolDef } from '../src/vault/tools.js';
 import type { AgentClient } from '../src/vault/auth.js';
 import type { Db } from '../src/db/index.js';
-import { seedHousehold, testDb } from './helpers.js';
+import { ciphers, seedHousehold, testDb } from './helpers.js';
 
 const tool = (name: string) => TOOLS.find((t) => t.name === name)! as unknown as ToolDef;
 const call = async (db: Db, agent: AgentClient, name: string, args: Record<string, unknown> = {}) => {
   const t = tool(name);
   const { z } = await import('zod');
   const parsed = z.object(t.input).parse(args);
-  return (await t.run({ db, agent }, parsed as never)).data as any;
+  return (await t.run({ db, agent, fc: ciphers.get(db)! }, parsed as never)).data as any;
 };
 const NOV = { start_date: '2026-11-01', end_date: '2026-11-30' };
 

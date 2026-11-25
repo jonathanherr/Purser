@@ -17,6 +17,9 @@ export async function testDb(): Promise<Db> {
   return db;
 }
 
+/** The field cipher seedHousehold used for each database, for tests that call tools directly. */
+export const ciphers = new WeakMap<Db, import('../src/crypto/fields.js').FieldCipher>();
+
 export const testKey = () => new LocalKeyProvider(randomBytes(32).toString('base64'));
 
 const balances = (current: number, available: number | null = current) =>
@@ -144,5 +147,6 @@ export async function seedHousehold(db: Db) {
     return { token, agent: (await authenticateAgent(db, token))! };
   };
 
+  ciphers.set(db, kp.fields);
   return { kp, ids, jonathanToken, partnerToken, agentToken, pj, jInst };
 }

@@ -116,6 +116,22 @@ master key stays in the Worker. While the Worker has no public URL, run the **Va
 workflow from the Actions tab instead: `sandbox-link` links a Plaid test bank for a member and
 runs a first sync, and `sync` syncs every linked bank. It uses the deploy's repository secrets.
 
+### Connect Claude (custom connector)
+
+The vault's MCP endpoint is an OAuth-protected remote MCP server, so it can be added to Claude
+as a custom connector. Connections are **read-only** (accounts, transactions, investments,
+budgets, flags) and act for one member, so visibility rules apply as usual.
+
+1. In Claude, add a custom connector with the URL `https://<vault host>/mcp`.
+2. Claude opens a Purser page with a pairing code such as `K7QM-3XPA`.
+3. Approve it within 15 minutes: Actions → **Vault admin** → `connect-approve`, with the code
+   and your member id. The page then continues by itself and Claude is connected.
+
+No secret is ever typed or sent anywhere: the pairing code only identifies the waiting sign-in,
+and only someone who can run the repo's workflows can approve it. Each connection is an
+`agent_clients` row named `connector-<member>-…`; set its `revoked_at` to disconnect it. Only
+Claude's own callback URLs can register (see `src/http/oauth.ts`).
+
 ### Local Worker
 
 ```sh
@@ -123,6 +139,22 @@ echo "VAULT_MASTER_KEY=..." > .dev.vars   # git-ignored; add PLAID_* too if you 
 npx wrangler d1 migrations apply DB --local
 npx wrangler dev
 ```
+
+## Data at rest
+
+- **Encrypted ledger.** Amounts, merchant names, account names and numbers, balances and
+  positions are stored as one AES-256-GCM ciphertext per row (`sealed` columns), with a key
+  derived from `VAULT_MASTER_KEY`. Ids, dates, categories and account types stay in the clear so
+  the vault can find rows. Each ciphertext is bound to its row. Plaid access tokens were already
+  envelope-encrypted. See `src/crypto/fields.ts`.
+- **13 months of history.** Older transactions are never stored, and the scheduled sync prunes
+  transactions, balance history and holdings snapshots as they age out.
+- **What this protects against:** a database export or backup, a leaked D1 API token, or anyone
+  browsing D1 in the Cloudflare dashboard. **What it doesn't:** someone in control of the whole
+  Cloudflare account, who could deploy code that reads the Worker's secret. A KMS key provider
+  outside Cloudflare closes that gap (see "Not yet done").
+- Totals and budgets are computed in the Worker after decrypting. A year of a household's
+  transactions is a few thousand rows, which decrypts in a few milliseconds.
 
 ## Tests
 

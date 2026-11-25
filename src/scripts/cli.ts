@@ -4,6 +4,7 @@ import { migrate } from '../db/migrate.js';
 import { AGENT_PRESETS, createAgent, createMember } from './admin.js';
 import { linkSandboxInstitution } from '../plaid/link.js';
 import { syncAll } from '../plaid/sync.js';
+import { approvePairing } from '../http/oauth.js';
 import type { Scope } from '../vault/auth.js';
 
 /**
@@ -15,6 +16,7 @@ import type { Scope } from '../vault/auth.js';
  *   agent:create  --id categorizer --preset categorizer --acts-for household
  *   sandbox:link  --member jonathan [--institution ins_109508]
  *   sync
+ *   connect:approve --code ABCD-EFGH --member jonathan   (approves a connector sign-in)
  */
 const [command, ...rest] = process.argv.slice(2);
 const { values } = parseArgs({
@@ -28,6 +30,7 @@ const { values } = parseArgs({
     'acts-for': { type: 'string', default: 'household' },
     member: { type: 'string' },
     institution: { type: 'string' },
+    code: { type: 'string' },
   },
 });
 
@@ -67,6 +70,13 @@ try {
     case 'sync':
       console.log(JSON.stringify(await syncAll(rt.db, rt.plaid!, rt.kp!), null, 2));
       break;
+    case 'connect:approve': {
+      if (!values.code || !values.member) throw new Error('--code and --member are required');
+      const ok = await approvePairing(rt.db, values.code, values.member);
+      if (!ok) throw new Error('no pending sign-in with that code (it may have expired after 15 minutes)');
+      console.log(`approved: the sign-in page will continue on its own and connect as ${values.member} (read-only)`);
+      break;
+    }
     default:
       throw new Error(`unknown command ${command ?? '(none)'}`);
   }

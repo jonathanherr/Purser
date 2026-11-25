@@ -5,6 +5,7 @@ import { plaidClient } from './plaid/client.js';
 import { createApp } from './http/app.js';
 import { syncAll } from './plaid/sync.js';
 import { expireProposals } from './vault/proposals.js';
+import { pruneSignIns } from './http/oauth.js';
 
 /**
  * Cloudflare Workers entry point. The Node entry (src/index.ts) stays for local development.
@@ -68,7 +69,7 @@ export default {
     const { db, kp, plaid } = wire(env);
     const work =
       controller.cron === EXPIRY_CRON
-        ? expireProposals(db)
+        ? Promise.all([expireProposals(db), pruneSignIns(db)])
         : plaid
           ? syncAll(db, plaid, kp)
           : Promise.resolve(console.log('scheduled sync skipped: Plaid is not configured'));

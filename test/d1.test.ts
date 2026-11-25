@@ -58,7 +58,7 @@ describe('on D1', () => {
     await expect(
       db.batch([
         { sql: `UPDATE institutions SET transactions_cursor = 'should-not-stick'` },
-        { sql: `INSERT INTO transactions (plaid_transaction_id, account_id, date, amount) VALUES ('x', 'no-such-account', '2026-11-01', 1)` },
+        { sql: `INSERT INTO transactions (plaid_transaction_id, account_id, date, sealed) VALUES ('x', 'no-such-account', '2026-11-01', 'f1:x')` },
       ]),
     ).rejects.toThrow();
     const { rows } = await db.query<{ c: string }>(`SELECT transactions_cursor AS c FROM institutions`);

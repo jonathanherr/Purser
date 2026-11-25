@@ -9,6 +9,15 @@ import { json, NOW, type Db, type Stmt } from '../db/index.js';
 import type { KeyProvider } from '../crypto/envelope.js';
 import { seal, unseal } from '../crypto/envelope.js';
 import { audit } from '../vault/audit.js';
+import {
+  retentionCutoff,
+  rowId,
+  type AccountFields,
+  type BalanceFields,
+  type FieldCipher,
+  type HoldingFields,
+  type TransactionFields,
+} from '../crypto/fields.js';
 import { plaidErrorCode, type PlaidLike } from './client.js';
 
 interface InstitutionRow {
@@ -124,10 +133,11 @@ export async function syncInstitution(
     // Every ledger write for this sync lands in one atomic batch, cursor included: if any
     // statement fails, nothing is written and the next sync retries from the old cursor.
     // On D1 the whole batch also counts as a single query against the per-request limit.
+    const now = new Date().toISOString();
     await db.batch([
-      ...upsertAccounts(inst, accounts),
-      ...applyTransactions(tx.added, tx.modified, tx.removed),
-      ...(investments ? upsertHoldings(investments.holdings, investments.securities) : []),
+      ...upsertAccounts(kp.fields, inst, accounts, now),
+      ...applyTransactions(kp.fields, tx.added, tx.modified, tx.removed, retentionCutoff()),
+      ...(investments ? upsertHoldings(kp.fields, investments.holdings, investments.securities, now.slice(0, 10)) : []),
       {
         sql: `UPDATE institutions SET transactions_cursor = ?2, last_synced_at = ${NOW}, status = 'active',
                 last_error = NULL WHERE id = ?1`,
@@ -160,6 +170,7 @@ export async function syncInstitution(
 }
 
 export async function syncAll(db: Db, plaid: PlaidLike, kp: KeyProvider): Promise<SyncResult[]> {
+  await pruneLedger(db);
   const { rows } = await db.query<{ id: string }>(
     `SELECT id FROM institutions WHERE status IN ('active', 'error') ORDER BY created_at`,
   );
@@ -203,69 +214,84 @@ async function pullHoldings(plaid: PlaidLike, accessToken: string) {
   }
 }
 
-function upsertAccounts(inst: InstitutionRow, accounts: AccountBase[]): Stmt[] {
+function upsertAccounts(fc: FieldCipher, inst: InstitutionRow, accounts: AccountBase[], now: string): Stmt[] {
   return accounts.flatMap((a): Stmt[] => [
     {
-      sql: `INSERT INTO accounts (institution_id, plaid_account_id, owner_member_id, name, official_name,
-                             type, subtype, mask, current_balance, available_balance, iso_currency_code)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+      sql: `INSERT INTO accounts (institution_id, plaid_account_id, owner_member_id, type, subtype, sealed)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6)
        ON CONFLICT (plaid_account_id) DO UPDATE SET
-         name = excluded.name, official_name = excluded.official_name, type = excluded.type,
-         subtype = excluded.subtype, mask = excluded.mask,
-         current_balance = excluded.current_balance, available_balance = excluded.available_balance,
-         iso_currency_code = excluded.iso_currency_code, updated_at = ${NOW}`,
+         type = excluded.type, subtype = excluded.subtype, sealed = excluded.sealed, updated_at = ${NOW}`,
       params: [
         inst.id,
         a.account_id,
         inst.owner_member_id,
-        a.name,
-        a.official_name ?? null,
         a.type,
         a.subtype ?? null,
-        a.mask ?? null,
-        a.balances.current ?? null,
-        a.balances.available ?? null,
-        a.balances.iso_currency_code ?? null,
+        fc.seal(
+          {
+            name: a.name,
+            official_name: a.official_name ?? null,
+            mask: a.mask ?? null,
+            current_balance: a.balances.current ?? null,
+            available_balance: a.balances.available ?? null,
+            currency: a.balances.iso_currency_code ?? null,
+          } satisfies AccountFields,
+          rowId.account(a.account_id),
+        ),
       ],
     },
     {
-      sql: `INSERT INTO balances (account_id, as_of, current, available)
-       SELECT id, ${NOW}, ?2, ?3 FROM accounts WHERE plaid_account_id = ?1
+      sql: `INSERT INTO balances (account_id, as_of, sealed)
+       SELECT id, ?2, ?3 FROM accounts WHERE plaid_account_id = ?1
        ON CONFLICT DO NOTHING`,
-      params: [a.account_id, a.balances.current ?? null, a.balances.available ?? null],
+      params: [
+        a.account_id,
+        now,
+        fc.seal(
+          { current: a.balances.current ?? null, available: a.balances.available ?? null } satisfies BalanceFields,
+          rowId.balance(a.account_id, now),
+        ),
+      ],
     },
   ]);
 }
 
-function applyTransactions(added: Transaction[], modified: Transaction[], removed: RemovedTransaction[]): Stmt[] {
-  const upserts = [...added, ...modified].map(
-    (t): Stmt => ({
-      sql: `INSERT INTO transactions (plaid_transaction_id, account_id, date, authorized_date, amount,
-                                 iso_currency_code, merchant_name, raw_name, pending, plaid_category,
-                                 raw)
-       SELECT ?1, a.id, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
-         FROM accounts a WHERE a.plaid_account_id = ?2
-       ON CONFLICT (plaid_transaction_id) DO UPDATE SET
-         date = excluded.date, authorized_date = excluded.authorized_date, amount = excluded.amount,
-         iso_currency_code = excluded.iso_currency_code, merchant_name = excluded.merchant_name,
-         raw_name = excluded.raw_name, pending = excluded.pending,
-         plaid_category = excluded.plaid_category, raw = excluded.raw,
-         removed_at = NULL, updated_at = ${NOW}`,
-      params: [
-        t.transaction_id,
-        t.account_id,
-        t.date,
-        t.authorized_date ?? null,
-        t.amount,
-        t.iso_currency_code ?? null,
-        t.merchant_name ?? null,
-        t.name ?? null,
-        t.pending,
-        t.personal_finance_category?.primary ?? null,
-        JSON.stringify(t),
-      ],
-    }),
-  );
+function applyTransactions(
+  fc: FieldCipher,
+  added: Transaction[],
+  modified: Transaction[],
+  removed: RemovedTransaction[],
+  cutoff: string,
+): Stmt[] {
+  // Transactions older than the retention window are never stored.
+  const upserts = [...added, ...modified]
+    .filter((t) => t.date >= cutoff)
+    .map(
+      (t): Stmt => ({
+        sql: `INSERT INTO transactions (plaid_transaction_id, account_id, date, pending, sealed)
+         SELECT ?1, a.id, ?3, ?4, ?5 FROM accounts a WHERE a.plaid_account_id = ?2
+         ON CONFLICT (plaid_transaction_id) DO UPDATE SET
+           date = excluded.date, pending = excluded.pending, sealed = excluded.sealed,
+           removed_at = NULL, updated_at = ${NOW}`,
+        params: [
+          t.transaction_id,
+          t.account_id,
+          t.date,
+          t.pending,
+          fc.seal(
+            {
+              amount: t.amount,
+              authorized_date: t.authorized_date ?? null,
+              currency: t.iso_currency_code ?? null,
+              merchant_name: t.merchant_name ?? null,
+              raw_name: t.name ?? null,
+              plaid_category: t.personal_finance_category?.primary ?? null,
+            } satisfies TransactionFields,
+            rowId.transaction(t.transaction_id),
+          ),
+        ],
+      }),
+    );
   const removals = removed.map(
     (r): Stmt => ({
       sql: `UPDATE transactions SET removed_at = ${NOW}, updated_at = ${NOW} WHERE plaid_transaction_id = ?1`,
@@ -275,7 +301,8 @@ function applyTransactions(added: Transaction[], modified: Transaction[], remove
   return [...upserts, ...removals];
 }
 
-function upsertHoldings(holdings: Holding[], securities: Security[]): Stmt[] {
+function upsertHoldings(fc: FieldCipher, holdings: Holding[], securities: Security[], today: string): Stmt[] {
+  // Securities are public market data (names, tickers, prices), so they stay in the clear.
   const secs = securities.map(
     (s): Stmt => ({
       sql: `INSERT INTO securities (plaid_security_id, name, ticker, type, close_price, close_price_as_of)
@@ -288,13 +315,32 @@ function upsertHoldings(holdings: Holding[], securities: Security[]): Stmt[] {
   );
   const pos = holdings.map(
     (h): Stmt => ({
-      sql: `INSERT INTO holdings (account_id, plaid_security_id, as_of, quantity, cost_basis, institution_value)
-       SELECT a.id, ?2, date('now'), ?3, ?4, ?5 FROM accounts a WHERE a.plaid_account_id = ?1
-       ON CONFLICT (account_id, plaid_security_id, as_of) DO UPDATE SET
-         quantity = excluded.quantity, cost_basis = excluded.cost_basis,
-         institution_value = excluded.institution_value`,
-      params: [h.account_id, h.security_id, h.quantity, h.cost_basis ?? null, h.institution_value],
+      sql: `INSERT INTO holdings (account_id, plaid_security_id, as_of, sealed)
+       SELECT a.id, ?2, ?3, ?4 FROM accounts a WHERE a.plaid_account_id = ?1
+       ON CONFLICT (account_id, plaid_security_id, as_of) DO UPDATE SET sealed = excluded.sealed`,
+      params: [
+        h.account_id,
+        h.security_id,
+        today,
+        fc.seal(
+          { quantity: h.quantity, cost_basis: h.cost_basis ?? null, market_value: h.institution_value ?? null } satisfies HoldingFields,
+          rowId.holding(h.account_id, h.security_id, today),
+        ),
+      ],
     }),
   );
   return [...secs, ...pos];
+}
+
+/**
+ * Deletes ledger rows older than the retention window (13 months). Runs before every scheduled
+ * sync. Balance and holdings history go too; current balances live on the account row.
+ */
+export async function pruneLedger(db: Db, now = new Date()): Promise<void> {
+  const cutoff = retentionCutoff(now);
+  await db.batch([
+    { sql: `DELETE FROM transactions WHERE date < ?1`, params: [cutoff] },
+    { sql: `DELETE FROM balances WHERE as_of < ?1`, params: [cutoff] },
+    { sql: `DELETE FROM holdings WHERE as_of < ?1`, params: [cutoff] },
+  ]);
 }
