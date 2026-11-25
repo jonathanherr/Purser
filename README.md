@@ -112,7 +112,9 @@ npm run purser -- agent:create --id watchdog --acts-for jonathan
 ```
 
 Link sandbox banks through the Worker (`POST /me/sandbox/link` with a member token), so the
-master key stays in the Worker.
+master key stays in the Worker. While the Worker has no public URL, run the **Vault admin**
+workflow from the Actions tab instead: `sandbox-link` links a Plaid test bank for a member and
+runs a first sync, and `sync` syncs every linked bank. It uses the deploy's repository secrets.
 
 ### Local Worker
 
