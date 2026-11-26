@@ -5,6 +5,7 @@ import { json, NOW, type Db } from '../db/index.js';
 import { hashToken, newToken } from '../crypto/tokens.js';
 import { audit } from '../vault/audit.js';
 import type { Scope } from '../vault/auth.js';
+import { BROWSER_HELPERS, esc, page, passkeyRoutes } from './passkeys.js';
 
 /**
  * OAuth 2.1 for remote MCP clients such as Claude custom connectors: discovery metadata,
@@ -36,7 +37,6 @@ export function normalizePairingCode(code: string): string {
 
 const s256 = (verifier: string) => createHash('sha256').update(verifier).digest('base64url');
 const origin = (c: Context) => new URL(c.req.url).origin;
-const esc = (s: string) => s.replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
 
 export function resourceMetadataUrl(requestUrl: string): string {
   return `${new URL(requestUrl).origin}/.well-known/oauth-protected-resource`;
@@ -151,25 +151,52 @@ export function oauthRoutes(db: Db) {
       page(
         'Connect to Purser',
         `<p>${who} wants read-only access to your Purser vault.</p>
-         <p>Your pairing code:</p>
-         <p class="code">${code}</p>
-         <p>Approve it from the <b>Vault admin</b> workflow (command <code>connect-approve</code>, with this code and
-         your member id), or ask Claude in your Purser project to approve it for you.</p>
-         <p id="status" class="muted">Waiting for approval. Keep this window open: it finishes the sign-in on its own
-         once the code is approved. The code expires in ${SIGN_IN_MINUTES} minutes.</p>
-         <p><button id="check" type="button">Check now</button></p>
+         <p id="pk"><button id="passkey" class="primary" type="button">Approve with passkey</button></p>
+         <p id="status" class="muted">Use Face ID, Touch ID or your device PIN. The request expires in ${SIGN_IN_MINUTES} minutes.</p>
+         <details id="pairing"><summary>No passkey on this device? Use a pairing code</summary>
+           <p>Your pairing code:</p>
+           <p class="code">${code}</p>
+           <p class="muted">Ask Claude in your Purser project to approve it, or use the <b>Vault admin</b> workflow
+           (command <code>connect-approve</code>). Keep this page open: it finishes on its own once the code is approved.</p>
+           <p><button id="check" type="button">Check now</button></p>
+         </details>
          <script>
+           ${BROWSER_HELPERS}
            const id = ${JSON.stringify(id)};
            let timer = null, busy = false, done = false;
            const status = (t) => { document.getElementById('status').textContent = t; };
+           const finish = (url) => { done = true; status('Approved. Returning to Claude...'); location.href = url; };
+           if (!passkeysWork()) { document.getElementById('pk').remove(); document.getElementById('pairing').open = true; status(''); }
+           document.getElementById('passkey')?.addEventListener('click', async () => {
+             try {
+               const o = await post('/authorize/passkey/options', { req: id });
+               if (o.error) return status(o.error);
+               o.challenge = dec(o.challenge);
+               o.allowCredentials = (o.allowCredentials || []).map((x) => ({ ...x, id: dec(x.id) }));
+               const cred = await navigator.credentials.get({ publicKey: o });
+               const res = await post('/authorize/passkey/verify', { req: id, response: {
+                 id: cred.id, rawId: enc(cred.rawId), type: cred.type,
+                 authenticatorAttachment: cred.authenticatorAttachment || undefined,
+                 clientExtensionResults: cred.getClientExtensionResults(),
+                 response: {
+                   clientDataJSON: enc(cred.response.clientDataJSON),
+                   authenticatorData: enc(cred.response.authenticatorData),
+                   signature: enc(cred.response.signature),
+                   userHandle: cred.response.userHandle ? enc(cred.response.userHandle) : undefined,
+                 },
+               } });
+               if (res.redirect) return finish(res.redirect);
+               status(res.error || 'That did not work. Try again.');
+             } catch (e) { status('The passkey prompt was cancelled. Try again, or use a pairing code below.'); }
+           });
            async function poll() {
              if (busy || done) return;
              busy = true; clearTimeout(timer);
              try {
                const r = await fetch('/authorize/poll?req=' + encodeURIComponent(id), { cache: 'no-store' });
                const b = await r.json();
-               if (b.redirect) { done = true; status('Approved. Returning to Claude...'); location.href = b.redirect; return; }
-               if (b.status === 'expired') { done = true; status('This code expired or was already used. Start again from Claude.'); return; }
+               if (b.redirect) return finish(b.redirect);
+               if (b.status === 'expired') { done = true; status('This sign-in expired or was already used. Start again from Claude.'); return; }
              } catch (e) {} finally { busy = false; }
              if (!done) timer = setTimeout(poll, 3000);
            }
@@ -196,17 +223,30 @@ export function oauthRoutes(db: Db) {
     if (!r || r.expired) return c.json({ status: 'expired' });
     if (!r.approved) return c.json({ status: 'pending' });
     if (r.issued) return c.json({ status: 'expired' }); // the code was already handed out once
-    const code = newToken('pac');
-    const { rows: set } = await db.query(
-      `UPDATE oauth_requests SET code_hash = ?2 WHERE id = ?1 AND code_hash IS NULL RETURNING id`,
-      [id, hashToken(code)],
-    );
-    if (!set.length) return c.json({ status: 'expired' });
-    const to = new URL(r.redirect_uri);
-    to.searchParams.set('code', code);
-    if (r.state) to.searchParams.set('state', r.state);
-    return c.json({ status: 'approved', redirect: to.toString() });
+    const redirect = await issueCode(db, id, r.redirect_uri, r.state);
+    return c.json(redirect ? { status: 'approved', redirect } : { status: 'expired' });
   });
+
+  // Approving with a passkey on the page itself: approve and hand back the redirect in one step.
+  app.route(
+    '/',
+    passkeyRoutes(db, async (requestId, memberId) => {
+      const { rows } = await db.query<{ redirect_uri: string; state: string | null; client_id: string }>(
+        `UPDATE oauth_requests SET member_id = ?2, approved_at = ${NOW}
+          WHERE id = ?1 AND approved_at IS NULL AND expires_at > ${NOW}
+          RETURNING redirect_uri, state, client_id`,
+        [requestId, memberId],
+      );
+      const r = rows[0];
+      await audit(db, {
+        actor: { type: 'member', id: memberId },
+        action: 'oauth.approve',
+        outcome: r ? 'ok' : 'denied',
+        detail: { memberId, clientId: r?.client_id ?? null, method: 'passkey' },
+      });
+      return r ? issueCode(db, requestId, r.redirect_uri, r.state) : null;
+    }),
+  );
 
   // ---- Token endpoint: authorization code + PKCE -> a read-only agent token for the member ----
   app.post('/token', async (c) => {
@@ -264,17 +304,17 @@ function protectedResource(c: Context) {
   return { resource: `${o}/mcp`, authorization_servers: [o], scopes_supported: ['vault:read'], bearer_methods_supported: ['header'] };
 }
 
-function page(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${esc(title)}</title><meta name="referrer" content="no-referrer">
-<style>
-  :root { color-scheme: light dark; --bg:#fbfaf7; --fg:#1d1c1a; --muted:#6b6861; --card:#fff; --line:#e6e2da; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#161513; --fg:#ece9e3; --muted:#a29e96; --card:#1f1e1b; --line:#34322e; } }
-  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
-  main { max-width:30rem; margin:12vh auto; padding:2rem; background:var(--card); border:1px solid var(--line); border-radius:12px; }
-  h1 { font-size:1.25rem; margin:0 0 1rem; } .muted { color:var(--muted); font-size:.9rem; }
-  button { font:inherit; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; }
-  .code { font:600 2rem/1.2 ui-monospace, monospace; letter-spacing:.08em; margin:.25rem 0 1rem; }
-  @media (max-width:520px) { main { margin:0; border-radius:0; border:0; padding:1.5rem 16px; } }
-</style></head><body><main><h1>${esc(title)}</h1>${body}</main></body></html>`;
+
+/** Issues the one-time authorization code for an approved sign-in and builds the redirect back to the client. */
+async function issueCode(db: Db, id: string, redirectUri: string, state: string | null): Promise<string | null> {
+  const code = newToken('pac');
+  const { rows } = await db.query(`UPDATE oauth_requests SET code_hash = ?2 WHERE id = ?1 AND code_hash IS NULL RETURNING id`, [
+    id,
+    hashToken(code),
+  ]);
+  if (!rows.length) return null;
+  const to = new URL(redirectUri);
+  to.searchParams.set('code', code);
+  if (state) to.searchParams.set('state', state);
+  return to.toString();
 }

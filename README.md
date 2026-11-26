@@ -122,15 +122,29 @@ The vault's MCP endpoint is an OAuth-protected remote MCP server, so it can be a
 as a custom connector. Connections are **read-only** (accounts, transactions, investments,
 budgets, flags) and act for one member, so visibility rules apply as usual.
 
-1. In Claude, add a custom connector with the URL `https://<vault host>/mcp`.
-2. Claude opens a Purser page with a pairing code such as `K7QM-3XPA`.
-3. Approve it within 15 minutes: Actions → **Vault admin** → `connect-approve`, with the code
-   and your member id. The page then continues by itself and Claude is connected.
+**Once per member, add a passkey.** An admin creates a one-time link (it works once, for 24
+hours; it is a secret, so don't run this in public Actions logs):
 
-No secret is ever typed or sent anywhere: the pairing code only identifies the waiting sign-in,
-and only someone who can run the repo's workflows can approve it. Each connection is an
-`agent_clients` row named `connector-<member>-…`; set its `revoked_at` to disconnect it. Only
-Claude's own callback URLs can register (see `src/http/oauth.ts`).
+```sh
+PURSER_DB=remote npm run purser -- passkey:link --member jonathan --url https://<vault host>
+```
+
+The member opens it on their phone or computer and taps **Create passkey** (Face ID, Touch ID
+or device PIN). Only the passkey's public key is stored (`member_passkeys`).
+
+**Connecting:**
+
+1. In Claude, add a custom connector with the URL `https://<vault host>/mcp`.
+2. Claude opens the Purser sign-in page. Tap **Approve with passkey**. Claude is connected.
+   This finishes in one visit, so it works in the Claude mobile app.
+
+**Fallback without a passkey:** the same page shows a pairing code such as `K7QM-3XPA`. Approve
+it within 15 minutes from Actions → **Vault admin** → `connect-approve`, with the code and the
+member id, while the page stays open; it then continues by itself.
+
+Each connection is an `agent_clients` row named `connector-<member>-…`; set its `revoked_at` to
+disconnect it. Set a passkey's `revoked_at` to stop it approving sign-ins. Only Claude's own
+callback URLs can register (see `src/http/oauth.ts`).
 
 ### Local Worker
 
