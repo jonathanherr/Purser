@@ -90,6 +90,29 @@ export function linkRoutes(deps: LinkDeps) {
     }
   });
 
+  // Plaid Link reports what went wrong in the browser (wrong institution, bad credentials, an
+  // outage). Keep the error code and institution for troubleshooting; never credentials.
+  app.post('/link/event', async (c) => {
+    const body = z
+      .object({
+        sid: z.string(),
+        event: z.string().max(64),
+        error_code: z.string().max(64).optional(),
+        error_type: z.string().max(64).optional(),
+        institution_id: z.string().max(64).optional(),
+        institution_name: z.string().max(200).optional(),
+        status: z.string().max(64).optional(),
+        view: z.string().max(64).optional(),
+      })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!body.success) return c.json({ ok: false }, 400);
+    const s = await session(body.data.sid);
+    if (!s?.member_id) return c.json({ ok: false }, 400);
+    const { sid: _sid, ...detail } = body.data;
+    await audit(db, { actor: { type: 'member', id: s.member_id }, action: 'link.event', outcome: detail.error_code ? 'error' : 'ok', detail });
+    return c.json({ ok: true });
+  });
+
   app.post('/link/exchange', async (c) => {
     const body = z
       .object({ sid: z.string(), public_token: z.string().min(1), institution_name: z.string().max(200).optional(), institution_id: z.string().max(64).optional() })
@@ -160,7 +183,13 @@ function linkBody(configured: boolean): string {
            if (r.ok) { document.getElementById('go').remove(); status(r.institution + ' is linked. The first sync is running; you can close this page.'); }
            else status(r.error || 'Saving failed. Reload and try again.');
          },
-         onExit: (err) => { if (err) status('Plaid stopped: ' + (err.display_message || err.error_message || err.error_code)); else status('Cancelled. Press the button to try again.'); },
+         onEvent: (event, m) => {
+           if (!['ERROR', 'EXIT', 'FAIL_OAUTH', 'SELECT_INSTITUTION', 'HANDOFF'].includes(event)) return;
+           post('/link/event', { sid, event, error_code: m.error_code || undefined, error_type: m.error_type || undefined,
+             institution_id: m.institution_id || undefined, institution_name: m.institution_name || undefined,
+             status: m.exit_status || undefined, view: m.view_name || undefined }).catch(() => {});
+         },
+         onExit: (err) => { if (err) status('Plaid stopped: ' + (err.display_message || err.error_message || '') + ' (' + err.error_code + ')'); else status('Cancelled. Press the button to try again.'); },
        });
        handler.open();
      }
