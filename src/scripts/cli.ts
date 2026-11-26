@@ -5,6 +5,7 @@ import { AGENT_PRESETS, createAgent, createMember } from './admin.js';
 import { linkSandboxInstitution } from '../plaid/link.js';
 import { syncAll } from '../plaid/sync.js';
 import { approvePairing } from '../http/oauth.js';
+import { createPasskeySetup } from '../http/passkeys.js';
 import type { Scope } from '../vault/auth.js';
 
 /**
@@ -17,6 +18,8 @@ import type { Scope } from '../vault/auth.js';
  *   sandbox:link  --member jonathan [--institution ins_109508]
  *   sync
  *   connect:approve --code ABCD-EFGH --member jonathan   (approves a connector sign-in)
+ *   passkey:link --member jonathan --url https://...      (one-time link to add a passkey; prints a secret link,
+ *                                                          so never run it in public Actions logs)
  */
 const [command, ...rest] = process.argv.slice(2);
 const { values } = parseArgs({
@@ -31,6 +34,7 @@ const { values } = parseArgs({
     member: { type: 'string' },
     institution: { type: 'string' },
     code: { type: 'string' },
+    url: { type: 'string' },
   },
 });
 
@@ -75,6 +79,13 @@ try {
       const ok = await approvePairing(rt.db, values.code, values.member);
       if (!ok) throw new Error('no pending sign-in with that code (it may have expired after 15 minutes)');
       console.log(`approved: the sign-in page will continue on its own and connect as ${values.member} (read-only)`);
+      break;
+    }
+    case 'passkey:link': {
+      if (!values.member || !values.url) throw new Error('--member and --url (the vault address) are required');
+      if (process.env.GITHUB_ACTIONS) throw new Error('passkey:link prints a secret link; run it locally, not in Actions');
+      console.log(await createPasskeySetup(rt.db, values.member, values.url));
+      console.log('Works once, for 24 hours. Send it to the member privately.');
       break;
     }
     default:
