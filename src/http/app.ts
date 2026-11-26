@@ -8,6 +8,7 @@ import { authenticateAgent, authenticateMember, parseBearer, type Member } from 
 import { audit } from '../vault/audit.js';
 import { buildMcpServer } from '../mcp/server.js';
 import { oauthRoutes, resourceMetadataUrl } from './oauth.js';
+import { linkRoutes } from './linkpage.js';
 import { decide } from '../vault/proposals.js';
 import { renderProposal } from '../vault/render.js';
 import { verifyPlaidWebhook } from '../plaid/webhook.js';
@@ -36,6 +37,7 @@ export function createApp(deps: AppDeps) {
 
   app.get('/healthz', (c) => c.json({ ok: true }));
   app.route('/', oauthRoutes(db));
+  app.route('/', linkRoutes(deps));
 
   // ---- Agents: MCP over Streamable HTTP, stateless, one server per request ----
   app.all('/mcp', async (c) => {
@@ -151,7 +153,7 @@ export function createApp(deps: AppDeps) {
   people.post('/link/token', async (c) => {
     const missing = needPlaid(c);
     if (missing) return missing;
-    return c.json(await deps.plaid!.createLinkToken(c.get('member').id, deps.plaidWebhookUrl));
+    return c.json(await deps.plaid!.createLinkToken(c.get('member').id, { webhook: deps.plaidWebhookUrl }));
   });
 
   people.post('/link/exchange', async (c) => {

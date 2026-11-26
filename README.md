@@ -146,6 +146,16 @@ Each connection is an `agent_clients` row named `connector-<member>-…`; set it
 disconnect it. Set a passkey's `revoked_at` to stop it approving sign-ins. Only Claude's own
 callback URLs can register (see `src/http/oauth.ts`).
 
+### Link a real account
+
+1. Get Plaid production keys: in the Plaid Dashboard apply for the free **Trial plan** (choose
+   "Personal use"; up to 10 connections). Set the secret with `gh secret set PLAID_SECRET_PRODUCTION`.
+   While that secret exists, deploys and the Vault admin workflow use Plaid production.
+2. In the Plaid Dashboard, add `https://<vault host>/plaid/oauth` to **Allowed redirect URIs**
+   (needed for banks that use their own sign-in screen).
+3. Open `https://<vault host>/link`, sign in with your passkey and pick your bank in Plaid's
+   window. Bank credentials go only to Plaid and the bank. The first sync starts right away.
+
 ### Local Worker
 
 ```sh

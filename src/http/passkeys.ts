@@ -180,7 +180,7 @@ export function passkeyRoutes(db: Db, approve: (requestId: string, memberId: str
   app.post('/authorize/passkey/options', async (c) => {
     const body = z.object({ req: z.string() }).safeParse(await c.req.json().catch(() => null));
     if (!body.success) return c.json({ error: 'bad request' }, 400);
-    const options = await generateAuthenticationOptions({ rpID: rpId(c), userVerification: 'required' });
+    const options = await passkeyLoginOptions(c);
     const { rows } = await db.query(
       `UPDATE oauth_requests SET webauthn_challenge = ?2
         WHERE id = ?1 AND approved_at IS NULL AND expires_at > ${NOW} RETURNING id`,
@@ -207,44 +207,84 @@ export function passkeyRoutes(db: Db, approve: (requestId: string, memberId: str
         ])
       : { rows: [] };
     const challenge = taken.length ? pending[0]!.challenge : undefined;
-    const { rows: pk } = await db.query<PasskeyRow>(
-      `SELECT credential_id, member_id, public_key, counter, transports FROM member_passkeys WHERE credential_id = ?1 AND revoked_at IS NULL`,
-      [response.id],
-    );
-    const p = pk[0];
-    if (!challenge || !p) {
+    if (!challenge) {
       await audit(db, { actor: { type: 'system', id: 'oauth' }, action: 'oauth.approve', outcome: 'denied', detail: { method: 'passkey' } });
-      return c.json({ error: challenge ? 'This passkey is not registered with Purser.' : 'This sign-in has expired. Start again from Claude.' }, 400);
+      return c.json({ error: 'This sign-in has expired. Start again from Claude.' }, 400);
     }
-    let newCounter: number;
-    try {
-      const v = await verifyAuthenticationResponse({
-        response: response as unknown as AuthenticationResponseJSON,
-        expectedChallenge: challenge,
-        expectedOrigin: origin(c),
-        expectedRPID: rpId(c),
-        credential: {
-          id: p.credential_id,
-          publicKey: unb64u(p.public_key),
-          counter: p.counter,
-          transports: p.transports ? json<AuthenticatorTransportFuture[]>(p.transports) : undefined,
-        },
-        requireUserVerification: true,
-      });
-      if (!v.verified) throw new Error('not verified');
-      newCounter = v.authenticationInfo.newCounter;
-    } catch {
-      await audit(db, { actor: { type: 'member', id: p.member_id }, action: 'oauth.approve', outcome: 'denied', detail: { method: 'passkey' } });
-      return c.json({ error: 'The passkey could not be verified. Try again.' }, 400);
+    const who = await verifyPasskeyAssertion(db, c, challenge, response);
+    if ('error' in who) {
+      await audit(db, { actor: who.memberId ? { type: 'member', id: who.memberId } : { type: 'system', id: 'oauth' }, action: 'oauth.approve', outcome: 'denied', detail: { method: 'passkey' } });
+      return c.json({ error: who.error }, 400);
     }
-    await db.query(`UPDATE member_passkeys SET counter = ?2, last_used_at = ${NOW} WHERE credential_id = ?1`, [p.credential_id, newCounter]);
-    const redirect = await approve(req, p.member_id);
+    const redirect = await approve(req, who.memberId);
     if (!redirect) return c.json({ error: 'This sign-in has expired. Start again from Claude.' }, 400);
     return c.json({ redirect });
   });
 
   return app;
 }
+
+
+/** Checks a passkey assertion against a challenge the server issued. Returns the member it belongs to. */
+export async function verifyPasskeyAssertion(
+  db: Db,
+  c: Context,
+  challenge: string,
+  response: { id: string },
+): Promise<{ memberId: string } | { error: string; memberId?: string }> {
+  const { rows } = await db.query<PasskeyRow>(
+    `SELECT credential_id, member_id, public_key, counter, transports FROM member_passkeys WHERE credential_id = ?1 AND revoked_at IS NULL`,
+    [response.id],
+  );
+  const p = rows[0];
+  if (!p) return { error: 'This passkey is not registered with Purser.' };
+  try {
+    const v = await verifyAuthenticationResponse({
+      response: response as unknown as AuthenticationResponseJSON,
+      expectedChallenge: challenge,
+      expectedOrigin: origin(c),
+      expectedRPID: rpId(c),
+      credential: {
+        id: p.credential_id,
+        publicKey: unb64u(p.public_key),
+        counter: p.counter,
+        transports: p.transports ? json<AuthenticatorTransportFuture[]>(p.transports) : undefined,
+      },
+      requireUserVerification: true,
+    });
+    if (!v.verified) throw new Error('not verified');
+    await db.query(`UPDATE member_passkeys SET counter = ?2, last_used_at = ${NOW} WHERE credential_id = ?1`, [
+      p.credential_id,
+      v.authenticationInfo.newCounter,
+    ]);
+    return { memberId: p.member_id };
+  } catch {
+    return { error: 'The passkey could not be verified. Try again.', memberId: p.member_id };
+  }
+}
+
+/** Starts a passkey sign-in: options for navigator.credentials.get, with a fresh challenge. */
+export const passkeyLoginOptions = (c: Context) => generateAuthenticationOptions({ rpID: rpId(c), userVerification: 'required' });
+
+/** Browser code that runs navigator.credentials.get with server options and returns the JSON response. */
+export const BROWSER_ASSERT = `
+  async function assertPasskey(o) {
+    o.challenge = dec(o.challenge);
+    o.allowCredentials = (o.allowCredentials || []).map((x) => ({ ...x, id: dec(x.id) }));
+    const cred = await navigator.credentials.get({ publicKey: o });
+    return {
+      id: cred.id, rawId: enc(cred.rawId), type: cred.type,
+      authenticatorAttachment: cred.authenticatorAttachment || undefined,
+      clientExtensionResults: cred.getClientExtensionResults(),
+      response: {
+        clientDataJSON: enc(cred.response.clientDataJSON),
+        authenticatorData: enc(cred.response.authenticatorData),
+        signature: enc(cred.response.signature),
+        userHandle: cred.response.userHandle ? enc(cred.response.userHandle) : undefined,
+      },
+    };
+  }
+`;
 
 type AuthenticatorTransportFuture = 'ble' | 'cable' | 'hybrid' | 'internal' | 'nfc' | 'smart-card' | 'usb';
 

@@ -21,9 +21,9 @@
   ],
 
   "vars": {
-    "PLAID_ENV": "sandbox"
-    // PLAID_WEBHOOK_URL: set once the public URL is known, e.g.
-    // "https://purser-vault.<your-subdomain>.workers.dev/plaid/webhook"
+    // The deploy workflow overrides this with "production" when PLAID_SECRET_PRODUCTION is set.
+    "PLAID_ENV": "sandbox",
+    "PLAID_WEBHOOK_URL": "https://purser-vault.geraniumlabs.workers.dev/plaid/webhook"
   },
 
   // Replaces the Node process's timers. Keep the first in sync with EXPIRY_CRON in src/worker.ts.
