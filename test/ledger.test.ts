@@ -48,8 +48,8 @@ describe('ledger at rest', () => {
     const kept = await db.query<{ date: string }>(`SELECT date FROM transactions ORDER BY date`);
     expect(kept.rows.map((r) => r.date)).toEqual([cutoff, '2026-11-01'].sort());
 
-    // A year and a month later, the November rows age out too.
-    await pruneLedger(db, new Date('2027-12-26T00:00:00Z'));
+    // More than 13 months later, everything synced today has aged out.
+    await pruneLedger(db, new Date(Date.now() + 400 * 86_400_000));
     expect((await db.query(`SELECT 1 FROM transactions`)).rows).toEqual([]);
     expect((await db.query(`SELECT 1 FROM balances`)).rows).toEqual([]);
   });
