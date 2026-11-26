@@ -155,18 +155,29 @@ export function oauthRoutes(db: Db) {
          <p class="code">${code}</p>
          <p>Approve it from the <b>Vault admin</b> workflow (command <code>connect-approve</code>, with this code and
          your member id), or ask Claude in your Purser project to approve it for you.</p>
-         <p id="status" class="muted">Waiting for approval. This page continues on its own. The code expires in ${SIGN_IN_MINUTES} minutes.</p>
+         <p id="status" class="muted">Waiting for approval. Keep this window open: it finishes the sign-in on its own
+         once the code is approved. The code expires in ${SIGN_IN_MINUTES} minutes.</p>
+         <p><button id="check" type="button">Check now</button></p>
          <script>
            const id = ${JSON.stringify(id)};
+           let timer = null, busy = false, done = false;
+           const status = (t) => { document.getElementById('status').textContent = t; };
            async function poll() {
+             if (busy || done) return;
+             busy = true; clearTimeout(timer);
              try {
-               const r = await fetch('/authorize/poll?req=' + encodeURIComponent(id));
+               const r = await fetch('/authorize/poll?req=' + encodeURIComponent(id), { cache: 'no-store' });
                const b = await r.json();
-               if (b.redirect) { location.href = b.redirect; return; }
-               if (b.status === 'expired') { document.getElementById('status').textContent = 'This code expired. Start again from Claude.'; return; }
-             } catch (e) {}
-             setTimeout(poll, 3000);
+               if (b.redirect) { done = true; status('Approved. Returning to Claude...'); location.href = b.redirect; return; }
+               if (b.status === 'expired') { done = true; status('This code expired or was already used. Start again from Claude.'); return; }
+             } catch (e) {} finally { busy = false; }
+             if (!done) timer = setTimeout(poll, 3000);
            }
+           // Browsers slow timers in background windows, so check again as soon as the window is back in view.
+           document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+           window.addEventListener('focus', poll);
+           window.addEventListener('pageshow', poll);
+           document.getElementById('check').addEventListener('click', poll);
            poll();
          </script>`,
       ),
@@ -262,6 +273,7 @@ function page(title: string, body: string): string {
   body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
   main { max-width:30rem; margin:12vh auto; padding:2rem; background:var(--card); border:1px solid var(--line); border-radius:12px; }
   h1 { font-size:1.25rem; margin:0 0 1rem; } .muted { color:var(--muted); font-size:.9rem; }
+  button { font:inherit; padding:.4rem .9rem; border-radius:8px; border:1px solid var(--line); background:var(--bg); color:var(--fg); cursor:pointer; }
   .code { font:600 2rem/1.2 ui-monospace, monospace; letter-spacing:.08em; margin:.25rem 0 1rem; }
   @media (max-width:520px) { main { margin:0; border-radius:0; border:0; padding:1.5rem 16px; } }
 </style></head><body><main><h1>${esc(title)}</h1>${body}</main></body></html>`;
