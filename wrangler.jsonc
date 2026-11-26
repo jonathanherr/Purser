@@ -34,10 +34,11 @@
     ]
   },
 
-  // The vault is not reachable until you choose to expose it: no workers.dev URL and no
-  // preview URLs. Flip workers_dev to true (or add a route) when you're ready for Plaid
-  // webhooks and remote agents to reach it.
-  "workers_dev": false,
+  // Public at https://purser-vault.<subdomain>.workers.dev so Claude connectors can reach /mcp.
+  // Everything but /healthz and the OAuth sign-in needs a token: /mcp takes read-only connector
+  // tokens (see src/http/oauth.ts) or agent tokens, /me a member token, and /plaid/webhook only
+  // accepts requests signed by Plaid. Preview URLs stay off.
+  "workers_dev": true,
   "preview_urls": false,
 
   "observability": { "enabled": true }
