@@ -75,7 +75,7 @@ export class FakePlaid implements PlaidLike {
   async exchangePublicToken(publicToken: string) {
     return { accessToken: this.nextAccessToken, itemId: `item-${publicToken}` };
   }
-  async createLinkToken() {
+  async createLinkToken(_memberId?: string, _opts?: { webhook?: string; redirectUri?: string }) {
     return { linkToken: 'link-sandbox-x', expiration: new Date().toISOString() };
   }
   async createSandboxPublicToken(institutionId: string) {

@@ -11,7 +11,7 @@ export interface PlaidLike {
   syncTransactions(accessToken: string, cursor: string | undefined): Promise<Plaid.TransactionsSyncResponse>;
   getHoldings(accessToken: string): Promise<{ holdings: Plaid.Holding[]; securities: Plaid.Security[] }>;
   exchangePublicToken(publicToken: string): Promise<{ accessToken: string; itemId: string }>;
-  createLinkToken(memberId: string, webhook?: string): Promise<{ linkToken: string; expiration: string }>;
+  createLinkToken(memberId: string, opts?: { webhook?: string; redirectUri?: string }): Promise<{ linkToken: string; expiration: string }>;
   /** Sandbox only: creates a public token for a test institution without the Link UI. */
   createSandboxPublicToken(institutionId: string, products: string[]): Promise<string>;
   getWebhookVerificationKey(keyId: string): Promise<JWK>;
@@ -19,10 +19,11 @@ export interface PlaidLike {
 
 export function plaidClient(config: Config): PlaidLike {
   if (!config.PLAID_CLIENT_ID || !config.PLAID_SECRET) {
-    throw new Error('PLAID_CLIENT_ID and PLAID_SECRET are required (use sandbox keys from dashboard.plaid.com)');
+    throw new Error('PLAID_CLIENT_ID and PLAID_SECRET are required (keys from dashboard.plaid.com)');
   }
+  const production = config.PLAID_ENV === 'production';
   const client = new PlaidClient({
-    environment: PlaidEnvironment.Sandbox,
+    environment: production ? PlaidEnvironment.Production : PlaidEnvironment.Sandbox,
     clientId: config.PLAID_CLIENT_ID,
     secret: config.PLAID_SECRET,
     timeoutInSeconds: 30,
@@ -43,7 +44,7 @@ export function plaidClient(config: Config): PlaidLike {
       const r = await client.item.exchangePublicToken({ public_token });
       return { accessToken: r.access_token, itemId: r.item_id };
     },
-    async createLinkToken(memberId, webhook) {
+    async createLinkToken(memberId, opts = {}) {
       const r = await client.link.createToken({
         user: { client_user_id: memberId },
         client_name: 'Purser',
@@ -51,11 +52,13 @@ export function plaidClient(config: Config): PlaidLike {
         optional_products: [Plaid.Products.Investments],
         country_codes: [Plaid.CountryCode.Us],
         language: 'en',
-        webhook,
+        webhook: opts.webhook,
+        redirect_uri: opts.redirectUri,
       });
       return { linkToken: r.link_token, expiration: r.expiration };
     },
     async createSandboxPublicToken(institution_id, products) {
+      if (production) throw new Error('sandbox test institutions are not available in production');
       const r = await client.sandbox.createPublicToken({
         institution_id,
         initial_products: products as Plaid.Products[],

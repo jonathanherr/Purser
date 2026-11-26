@@ -39,7 +39,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       VAULT_MASTER_KEY: ${{ secrets.VAULT_MASTER_KEY }}
       PLAID_CLIENT_ID: ${{ secrets.PLAID_CLIENT_ID }}
-      PLAID_SECRET: ${{ secrets.PLAID_SECRET }}
+      PLAID_SECRET: ${{ secrets.PLAID_SECRET_PRODUCTION || secrets.PLAID_SECRET }}
+      PLAID_ENV: ${{ secrets.PLAID_SECRET_PRODUCTION != '' && 'production' || 'sandbox' }}
       PURSER_DB: remote
     steps:
       - uses: actions/checkout@v4

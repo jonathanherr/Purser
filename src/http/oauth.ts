@@ -67,6 +67,8 @@ export async function approvePairing(db: Db, code: string, memberId: string): Pr
 /** Drops sign-in attempts a day after they expire. Runs with the proposal-expiry cron. */
 export async function pruneSignIns(db: Db): Promise<void> {
   await db.query(`DELETE FROM oauth_requests WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')`);
+  await db.query(`DELETE FROM link_sessions WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')`);
+  await db.query(`DELETE FROM passkey_setups WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')`);
 }
 
 export function oauthRoutes(db: Db) {

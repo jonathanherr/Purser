@@ -11,8 +11,8 @@ const Env = z.object({
   PORT: z.coerce.number().default(8787),
   PLAID_CLIENT_ID: z.string().optional(),
   PLAID_SECRET: z.string().optional(),
-  // Purser is sandbox-only until phase 1c. Anything else is refused at start-up.
-  PLAID_ENV: z.literal('sandbox').default('sandbox'),
+  // 'production' links real accounts (Plaid Trial or paid plan). Sandbox stays the default.
+  PLAID_ENV: z.enum(['sandbox', 'production']).default('sandbox'),
   PLAID_WEBHOOK_URL: z.string().url().optional(),
   // Required wherever access tokens are sealed or opened (server, Worker, sync, linking).
   VAULT_MASTER_KEY: z.string().min(1).optional(),
