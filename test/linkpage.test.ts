@@ -46,6 +46,11 @@ describe('link an account page', () => {
     expect(v.body.linkToken).toBeTruthy();
     expect(linkCalls).toEqual([{ memberId: 'jonathan', webhook: `${BASE}/plaid/webhook`, redirectUri: `${BASE}/plaid/oauth` }]);
 
+    // Link errors are kept for troubleshooting, tied to the signed-in member.
+    expect((await post('/link/event', { sid: start.body.sid, event: 'ERROR', error_code: 'INVALID_CREDENTIALS', institution_name: 'SoFi' })).body).toEqual({ ok: true });
+    const ev = await db.query<{ detail: string }>(`SELECT detail FROM audit_log WHERE action = 'link.event' AND actor_id = 'jonathan'`);
+    expect(ev.rows[0]!.detail).toContain('INVALID_CREDENTIALS');
+
     const ex = await post('/link/exchange', { sid: start.body.sid, public_token: 'public-sofi', institution_name: 'SoFi', institution_id: 'ins_sofi' });
     expect(ex.body).toEqual({ ok: true, institution: 'SoFi' });
     // One Item per sign-in.
