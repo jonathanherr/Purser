@@ -178,9 +178,16 @@ export function dashboardRoutes(deps: DashboardDeps) {
       accessToken = await openAccessToken(db, deps.kp, body.data.institutionId);
     }
     try {
-      const { linkToken } = await createLinkToken(deps.plaid, me, { webhook: deps.plaidWebhookUrl, redirectUri: oauthReturnUrl(c), accessToken });
-      return c.json({ linkToken });
+      const t = await createLinkToken(deps.plaid, me, { webhook: deps.plaidWebhookUrl, redirectUri: oauthReturnUrl(c), accessToken });
+      await audit(db, {
+        actor: { type: 'member', id: me },
+        action: 'link.token',
+        outcome: 'ok',
+        detail: { update: !!accessToken, oauthReturn: t.oauthReturn, rejected: 'rejected' in t ? t.rejected : null },
+      });
+      return c.json({ linkToken: t.linkToken });
     } catch (e) {
+      await audit(db, { actor: { type: 'member', id: me }, action: 'link.token', outcome: 'error', detail: { error: plaidErrorCode(e) ?? String(e) } });
       return c.json({ error: `Plaid refused to start (${plaidErrorCode(e) ?? 'unknown error'}).` }, 502);
     }
   });
@@ -261,10 +268,10 @@ function later(deps: DashboardDeps, work: Promise<unknown>) {
 /** Asks Plaid for a Link token, with the OAuth return page when the Dashboard allows it. */
 async function createLinkToken(plaid: PlaidLike, memberId: string, opts: { webhook?: string; redirectUri: string; accessToken?: string }) {
   try {
-    return await plaid.createLinkToken(memberId, opts);
+    return { ...(await plaid.createLinkToken(memberId, opts)), oauthReturn: true };
   } catch (e) {
     // Until the return page is in "Allowed redirect URIs", Plaid rejects it. Most banks work without it.
-    if (plaidErrorCode(e)?.startsWith('INVALID_')) return plaid.createLinkToken(memberId, { ...opts, redirectUri: undefined });
+    if (plaidErrorCode(e)?.startsWith('INVALID_')) return { ...(await plaid.createLinkToken(memberId, { ...opts, redirectUri: undefined })), oauthReturn: false, rejected: plaidErrorCode(e) };
     throw e;
   }
 }
@@ -345,7 +352,7 @@ function dashboardHtml(): string {
   const $ = (id) => document.getElementById(id);
   const api = async (path, body) => {
     const r = await fetch(path, body === undefined ? { cache: 'no-store' } :
-      { method: 'POST', headers: { 'content-type': 'application/json', 'x-purser': '1' }, body: JSON.stringify(body) });
+      { method: 'POST', keepalive: true, headers: { 'content-type': 'application/json', 'x-purser': '1' }, body: JSON.stringify(body) });
     const b = await r.json().catch(() => ({}));
     if (r.status === 401) { show('signin'); throw new Error('signed out'); }
     return b;
@@ -414,7 +421,7 @@ function dashboardHtml(): string {
         setTimeout(refresh, 8000);
       },
       onEvent: (event, m) => {
-        if (!['ERROR', 'EXIT', 'FAIL_OAUTH', 'SELECT_INSTITUTION', 'HANDOFF'].includes(event)) return;
+        if (!['ERROR', 'EXIT', 'FAIL_OAUTH', 'SELECT_INSTITUTION', 'HANDOFF', 'OPEN_OAUTH', 'OPEN', 'TRANSITION_VIEW'].includes(event)) return;
         api('/app/api/plaid/event', { event, error_code: m.error_code || undefined, error_type: m.error_type || undefined,
           error_message: m.error_message || undefined, institution_id: m.institution_id || undefined,
           institution_name: m.institution_name || undefined, status: m.exit_status || undefined, view: m.view_name || undefined }).catch(() => {});
