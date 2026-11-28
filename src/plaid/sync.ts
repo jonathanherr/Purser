@@ -169,6 +169,17 @@ export async function syncInstitution(
   return result;
 }
 
+/** Opens an institution's access token, for Plaid Link update mode. */
+export async function openAccessToken(db: Db, kp: KeyProvider, institutionId: string): Promise<string | undefined> {
+  const { rows } = await db.query<InstitutionRow>(
+    `SELECT plaid_item_id, access_token_ct, wrapped_dek, key_id FROM institutions WHERE id = ?1 AND status <> 'removed'`,
+    [institutionId],
+  );
+  const inst = rows[0];
+  if (!inst) return undefined;
+  return unseal(kp, { ciphertext: inst.access_token_ct, wrappedDek: inst.wrapped_dek, keyId: inst.key_id }, tokenContext(inst.plaid_item_id));
+}
+
 export async function syncAll(db: Db, plaid: PlaidLike, kp: KeyProvider): Promise<SyncResult[]> {
   await pruneLedger(db);
   const { rows } = await db.query<{ id: string }>(

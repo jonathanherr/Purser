@@ -11,7 +11,11 @@ export interface PlaidLike {
   syncTransactions(accessToken: string, cursor: string | undefined): Promise<Plaid.TransactionsSyncResponse>;
   getHoldings(accessToken: string): Promise<{ holdings: Plaid.Holding[]; securities: Plaid.Security[] }>;
   exchangePublicToken(publicToken: string): Promise<{ accessToken: string; itemId: string }>;
-  createLinkToken(memberId: string, opts?: { webhook?: string; redirectUri?: string }): Promise<{ linkToken: string; expiration: string }>;
+  /** With accessToken, starts Link in update mode to repair an existing connection. */
+  createLinkToken(
+    memberId: string,
+    opts?: { webhook?: string; redirectUri?: string; accessToken?: string },
+  ): Promise<{ linkToken: string; expiration: string }>;
   /** Sandbox only: creates a public token for a test institution without the Link UI. */
   createSandboxPublicToken(institutionId: string, products: string[]): Promise<string>;
   getWebhookVerificationKey(keyId: string): Promise<JWK>;
@@ -48,8 +52,9 @@ export function plaidClient(config: Config): PlaidLike {
       const r = await client.link.createToken({
         user: { client_user_id: memberId },
         client_name: 'Purser',
-        products: [Plaid.Products.Transactions],
-        optional_products: [Plaid.Products.Investments],
+        ...(opts.accessToken
+          ? { access_token: opts.accessToken }
+          : { products: [Plaid.Products.Transactions], optional_products: [Plaid.Products.Investments] }),
         country_codes: [Plaid.CountryCode.Us],
         language: 'en',
         webhook: opts.webhook,
