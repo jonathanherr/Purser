@@ -8,7 +8,7 @@ import { authenticateAgent, authenticateMember, parseBearer, type Member } from 
 import { audit } from '../vault/audit.js';
 import { buildMcpServer } from '../mcp/server.js';
 import { oauthRoutes, resourceMetadataUrl } from './oauth.js';
-import { linkRoutes } from './linkpage.js';
+import { dashboardRoutes } from './dashboard.js';
 import { decide } from '../vault/proposals.js';
 import { renderProposal } from '../vault/render.js';
 import { verifyPlaidWebhook } from '../plaid/webhook.js';
@@ -20,6 +20,7 @@ export interface AppDeps {
   kp: KeyProvider;
   plaid?: PlaidLike;
   plaidWebhookUrl?: string;
+  plaidEnv?: string;
   /** Tests can replace webhook verification. Production always uses Plaid's signed JWT. */
   verifyWebhook?: (rawBody: string, jwt: string | undefined) => Promise<boolean>;
   /**
@@ -37,7 +38,7 @@ export function createApp(deps: AppDeps) {
 
   app.get('/healthz', (c) => c.json({ ok: true }));
   app.route('/', oauthRoutes(db));
-  app.route('/', linkRoutes(deps));
+  app.route('/', dashboardRoutes(deps));
 
   // ---- Agents: MCP over Streamable HTTP, stateless, one server per request ----
   app.all('/mcp', async (c) => {

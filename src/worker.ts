@@ -57,6 +57,7 @@ export default {
       kp,
       plaid,
       plaidWebhookUrl: config.PLAID_WEBHOOK_URL,
+      plaidEnv: config.PLAID_ENV,
       background: (work) => pending.push(work),
     });
     const response = await app.fetch(request);

@@ -153,8 +153,10 @@ callback URLs can register (see `src/http/oauth.ts`).
    While that secret exists, deploys and the Vault admin workflow use Plaid production.
 2. In the Plaid Dashboard, add `https://<vault host>/plaid/oauth` to **Allowed redirect URIs**
    (needed for banks that use their own sign-in screen).
-3. Open `https://<vault host>/link`, sign in with your passkey and pick your bank in Plaid's
-   window. Bank credentials go only to Plaid and the bank. The first sync starts right away.
+3. Open the dashboard at `https://<vault host>/app`, sign in with your passkey and choose
+   **Link an account**. Bank credentials go only to Plaid and the bank. The first sync starts
+   right away. The dashboard also shows each connection's status and Plaid error codes, repairs
+   a connection with **Fix connection** (Plaid update mode) and runs **Sync now**.
 
 ### Local Worker
 
